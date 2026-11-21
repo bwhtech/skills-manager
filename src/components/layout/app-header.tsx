@@ -6,6 +6,7 @@ import {
   Moon02Icon,
   MoreVerticalIcon,
   RefreshIcon,
+  Search01Icon,
   Sun03Icon,
 } from "@hugeicons/core-free-icons"
 import { Button } from "@/components/ui/button"
@@ -70,16 +71,24 @@ function DesktopHeader() {
       <div className="ml-auto flex shrink-0 items-center gap-1.5">
         <UpdateStatus scope={scope} scopeName={name} />
         <Separator orientation="vertical" className="mx-1 h-5 self-center!" />
-        <Tooltip>
-          <TooltipTrigger render={<Button variant="outline" size="sm" className="h-7" onClick={() => ui.setInstallOpen(true)} />}>
-            <HugeiconsIcon icon={Download04Icon} strokeWidth={2} />
-            Install
-          </TooltipTrigger>
-          <TooltipContent>
-            Install skills <Kbd>{modKey}</Kbd>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 gap-2 text-muted-foreground"
+          aria-label="Search skills"
+          onClick={() => ui.setPaletteOpen(true)}
+        >
+          <HugeiconsIcon icon={Search01Icon} strokeWidth={2} />
+          Search
+          <span className="flex gap-0.5" aria-hidden>
+            <Kbd>{modKey}</Kbd>
             <Kbd>K</Kbd>
-          </TooltipContent>
-        </Tooltip>
+          </span>
+        </Button>
+        <Button variant="outline" size="sm" className="h-7" onClick={() => ui.setInstallOpen(true)}>
+          <HugeiconsIcon icon={Download04Icon} strokeWidth={2} />
+          Install
+        </Button>
         <Tooltip>
           <TooltipTrigger
             render={
@@ -128,6 +137,9 @@ function PhoneHeader() {
       <div className="flex h-12 items-center gap-0.5 px-1">
         <SidebarTrigger className="size-11" />
         <h1 className="min-w-0 flex-1 truncate px-1 text-sm font-semibold">{name}</h1>
+        <Button variant="ghost" size="icon" className="size-11" aria-label="Search skills" onClick={() => ui.setPaletteOpen(true)}>
+          <HugeiconsIcon icon={Search01Icon} strokeWidth={2} />
+        </Button>
         <Button variant="ghost" size="icon" className="size-11" aria-label="Install skills" onClick={() => ui.setInstallOpen(true)}>
           <HugeiconsIcon icon={Download04Icon} strokeWidth={2} />
         </Button>

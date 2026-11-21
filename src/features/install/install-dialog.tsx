@@ -27,9 +27,9 @@ import { SearchSource } from "./search-source"
 import type { Pick } from "./types"
 
 export function InstallDialog() {
-  const { installOpen } = useUi()
+  const { installOpen, installQuery } = useUi()
   return (
-    <Dialog open={installOpen} onOpenChange={ui.setInstallOpen}>
+    <Dialog open={installOpen} onOpenChange={(open) => ui.setInstallOpen(open)}>
       {/* Phones: full screen, one scrolling body, footer above the home indicator. */}
       <DialogContent
         className={cn(
@@ -43,7 +43,7 @@ export function InstallDialog() {
           <DialogTitle>Install skills</DialogTitle>
           <DialogDescription>Find skills on skills.sh or in a GitHub repository.</DialogDescription>
         </DialogHeader>
-        <InstallForm />
+        <InstallForm initialQuery={installQuery} />
       </DialogContent>
     </Dialog>
   )
@@ -58,7 +58,7 @@ function defaultAgents(data: AgentsResponse | undefined) {
 }
 
 // Mounted only while the dialog is open, so each open starts fresh.
-function InstallForm() {
+function InstallForm({ initialQuery }: { initialQuery: string }) {
   const place = usePlace()
   const projects = useScopes().data?.projects ?? []
   const agents = useAgents()
@@ -100,7 +100,7 @@ function InstallForm() {
             <TabsTrigger value="repo">From repository</TabsTrigger>
           </TabsList>
           <TabsContent value="search" keepMounted className="flex min-h-0 flex-col [&[hidden]]:hidden">
-            <SearchSource pick={searchPick} onPick={setSearchPick} />
+            <SearchSource initialText={initialQuery} pick={searchPick} onPick={setSearchPick} />
           </TabsContent>
           <TabsContent value="repo" keepMounted className="flex min-h-0 flex-col [&[hidden]]:hidden">
             <RepoSource pick={repoPick} onPick={setRepoPick} />

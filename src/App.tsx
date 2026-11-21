@@ -6,6 +6,7 @@ import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { InstallDialog } from "@/features/install/install-dialog"
+import { CommandPalette } from "@/features/palette/command-palette"
 import { InstructionsView } from "@/features/instructions/instructions-view"
 import { JobsSheet } from "@/features/jobs/jobs-sheet"
 import { FileViewer } from "@/features/open/file-viewer"
@@ -17,7 +18,7 @@ import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { usePlace } from "@/lib/hash-state"
 import { isMod, useWindowKeydown } from "@/lib/hotkeys"
 import { queryClient } from "@/lib/query-client"
-import { ui, useUi } from "@/lib/ui-store"
+import { getUi, ui, useUi } from "@/lib/ui-store"
 
 const UpdateAllDialog = lazy(() =>
   import("@/features/updates/update-all-dialog").then((module) => ({ default: module.UpdateAllDialog }))
@@ -94,7 +95,8 @@ export function App() {
   useWindowKeydown((event) => {
     if (isMod(event) && !event.altKey && event.key.toLowerCase() === "k") {
       event.preventDefault()
-      ui.setInstallOpen(true)
+      // Inside the install dialog, Cmd/Ctrl+K stays put.
+      if (!getUi().installOpen) ui.setPaletteOpen(!getUi().paletteOpen)
     }
   })
 
@@ -117,6 +119,7 @@ export function App() {
         </SidebarProvider>
         <JobsSheet />
         <FileViewer />
+        <CommandPalette />
         <InstallDialog />
         <UpdateAllDialogSlot />
         <UnsavedChangesDialog />

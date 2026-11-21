@@ -11,12 +11,13 @@ import { cn } from "@/lib/utils"
 import type { Pick } from "./types"
 
 interface SearchSourceProps {
+  initialText?: string
   pick: Pick | null
   onPick: (pick: Pick | null) => void
 }
 
-export function SearchSource({ pick, onPick }: SearchSourceProps) {
-  const [text, setText] = useState("")
+export function SearchSource({ initialText = "", pick, onPick }: SearchSourceProps) {
+  const [text, setText] = useState(initialText)
   const query = useDebounced(text.trim(), 300)
   const results = useSearch(query)
   const list = query.length >= 2 ? (results.data ?? []) : []

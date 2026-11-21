@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react"
 import type { ScopeKey } from "@shared/api"
 
 // App-wide UI state that several unrelated components open or read:
-// the jobs drawer, the install dialog, the Update all dialog and the file viewer.
+// the jobs drawer, the command palette, the install dialog, the Update all dialog and the file viewer.
 
 /** A plain file a document linked to, shown in the file viewer. */
 export interface ViewedFile {
@@ -14,7 +14,10 @@ export interface ViewedFile {
 interface UiState {
   jobsOpen: boolean
   selectedJobId: string | null
+  paletteOpen: boolean
   installOpen: boolean
+  /** skills.sh search text the install dialog opens with */
+  installQuery: string
   /** the scope whose Update all dialog is open */
   updateAllScope: ScopeKey | null
   viewedFile: ViewedFile | null
@@ -23,7 +26,9 @@ interface UiState {
 let state: UiState = {
   jobsOpen: false,
   selectedJobId: null,
+  paletteOpen: false,
   installOpen: false,
+  installQuery: "",
   updateAllScope: null,
   viewedFile: null,
 }
@@ -53,7 +58,9 @@ export const ui = {
     set({ jobsOpen: true, selectedJobId: jobId ?? state.selectedJobId }),
   setJobsOpen: (open: boolean) => set({ jobsOpen: open }),
   selectJob: (jobId: string) => set({ selectedJobId: jobId }),
-  setInstallOpen: (open: boolean) => set({ installOpen: open }),
+  setPaletteOpen: (open: boolean) => set({ paletteOpen: open }),
+  setInstallOpen: (open: boolean, query = "") =>
+    set(open ? { installOpen: true, installQuery: query, paletteOpen: false } : { installOpen: false }),
   openUpdateAll: (scope: ScopeKey) => set({ updateAllScope: scope }),
   closeUpdateAll: () => set({ updateAllScope: null }),
   /** Raw: features/open closes and replaces the viewer through its unsaved-changes guard. */

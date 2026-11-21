@@ -103,6 +103,8 @@ export const api = {
   agents: () => request<AgentsResponse>("GET", "/api/agents"),
 
   skills: (scope: ScopeKey) => request<SkillSummary[]>("GET", `/api/skills?${q({ scope })}`),
+  /** every scope's skills, each once */
+  allSkills: () => request<SkillSummary[]>("GET", "/api/skills"),
   skill: async (id: string) => {
     const generation = requestGeneration()
     const detail = await request<SkillDetail>("GET", `/api/skills/${id}`)
@@ -166,6 +168,8 @@ export const keys = {
   scopes: ["scopes"] as const,
   agents: ["agents"] as const,
   skills: (scope: ScopeKey) => ["skills", scope] as const,
+  // Under "skills", so every skills invalidation refreshes it. No scope is named "*".
+  allSkills: ["skills", "*"] as const,
   skill: (id: string) => ["skill", id] as const,
   skillFile: (id: string, path: string) => ["skill", id, "file", path] as const,
   instructions: (scope: ScopeKey) => ["instructions", scope] as const,
@@ -194,6 +198,11 @@ export function useAgents() {
 // a layout switch): the update flags change when jobs and checks end.
 export function useSkills(scope: ScopeKey) {
   return useQuery({ queryKey: keys.skills(scope), queryFn: () => api.skills(scope), refetchOnMount: "always" })
+}
+
+/** Every scope's skills, for the command palette. Fetched while `enabled`. */
+export function useAllSkills(enabled: boolean) {
+  return useQuery({ queryKey: keys.allSkills, queryFn: api.allSkills, enabled })
 }
 
 export function useSkill(id: string | null) {
