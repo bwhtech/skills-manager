@@ -1,16 +1,28 @@
 import { Hono } from "hono"
 import { serveStatic } from "hono/bun"
+import { createApi } from "./app.ts"
+import { config } from "./config.ts"
+import { createServices } from "./services.ts"
 
-const PORT = Number(process.env.PORT ?? 3530)
-const HOST = process.env.HOST ?? "127.0.0.1"
+const services = await createServices()
 
 const app = new Hono()
-
-app.get("/api/health", (c) => c.json({ ok: true }))
+app.route("/api", createApi(services))
 
 // Built UI (production). In development, Vite serves the UI and proxies /api here.
 app.use("/*", serveStatic({ root: "./dist" }))
 app.get("*", serveStatic({ path: "./dist/index.html" }))
 
-export default { port: PORT, hostname: HOST, fetch: app.fetch, idleTimeout: 0 }
-console.log(`skills-manager on http://${HOST}:${PORT}`)
+// Warm the skill cache and look for updates in the background.
+void services.skills
+  .all()
+  .catch((err) => console.error("skill discovery failed:", err))
+services.updates.start()
+
+export default {
+  port: config.port,
+  hostname: config.host,
+  fetch: app.fetch,
+  idleTimeout: 0,
+}
+console.log(`skills-manager on http://${config.host}:${config.port}`)

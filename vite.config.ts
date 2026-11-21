@@ -15,6 +15,10 @@ export default defineConfig({
   server: {
     port: 5530,
     host: "127.0.0.1",
-    proxy: { "/api": "http://127.0.0.1:3530" },
+    // Keep Host and add X-Forwarded-Host, so the server's Origin check
+    // accepts mutating requests made through the dev proxy.
+    proxy: {
+      "/api": { target: "http://127.0.0.1:3530", changeOrigin: false, xfwd: true },
+    },
   },
 })

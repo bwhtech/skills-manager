@@ -41,6 +41,8 @@ export interface ScopesResponse {
   lastScanAt: string | null // ISO time
 }
 
+// GET /api/scopes                    -> ScopesResponse
+// GET /api/health                    -> {ok: true}
 // POST /api/projects/rescan            -> ScopesResponse
 // POST /api/projects/pin   {path}      -> ScopesResponse  (400 if not a dir)
 // DELETE /api/projects/pin {path}      -> ScopesResponse

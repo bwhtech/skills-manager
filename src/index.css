@@ -128,3 +128,119 @@
     @apply font-mono;
     }
 }
+/* ---------- Syntax colors (editor and preview) ---------- */
+
+:root {
+  --syntax-keyword: oklch(0.5 0.17 300);
+  --syntax-string: oklch(0.5 0.13 145);
+  --syntax-number: oklch(0.55 0.15 50);
+  --syntax-property: oklch(0.48 0.13 250);
+  --syntax-type: oklch(0.52 0.12 200);
+  --syntax-comment: oklch(0.6 0.02 322);
+  --syntax-heading: oklch(0.35 0.08 131);
+  --syntax-link: oklch(0.5 0.14 250);
+  --syntax-meta: oklch(0.6 0.03 322);
+  --syntax-invalid: var(--destructive);
+}
+
+.dark {
+  --syntax-keyword: oklch(0.76 0.13 305);
+  --syntax-string: oklch(0.8 0.14 135);
+  --syntax-number: oklch(0.8 0.12 60);
+  --syntax-property: oklch(0.78 0.1 240);
+  --syntax-type: oklch(0.8 0.09 195);
+  --syntax-comment: oklch(0.6 0.02 322);
+  --syntax-heading: oklch(0.86 0.18 128);
+  --syntax-link: oklch(0.78 0.1 240);
+  --syntax-meta: oklch(0.62 0.03 322);
+}
+
+.tok-keyword,
+.tok-operator,
+.tok-modifier { color: var(--syntax-keyword); }
+.tok-string,
+.tok-string2,
+.tok-inserted { color: var(--syntax-string); }
+.tok-number,
+.tok-bool,
+.tok-atom,
+.tok-literal { color: var(--syntax-number); }
+.tok-propertyName,
+.tok-labelName,
+.tok-attributeName { color: var(--syntax-property); }
+.tok-typeName,
+.tok-className,
+.tok-namespace,
+.tok-macroName { color: var(--syntax-type); }
+.tok-variableName2,
+.tok-definition { color: var(--syntax-property); }
+.tok-comment,
+.tok-quote { color: var(--syntax-comment); font-style: italic; }
+.tok-meta,
+.tok-punctuation,
+.tok-list { color: var(--syntax-meta); }
+.tok-heading { color: var(--syntax-heading); font-weight: 600; }
+.tok-link,
+.tok-url { color: var(--syntax-link); }
+.tok-url { text-decoration: underline; text-underline-offset: 2px; }
+.tok-strong { font-weight: 700; }
+.tok-emphasis { font-style: italic; }
+.tok-strikethrough { text-decoration: line-through; }
+.tok-monospace { color: var(--syntax-string); }
+.tok-deleted,
+.tok-invalid { color: var(--syntax-invalid); }
+
+/* ---------- Markdown preview ---------- */
+
+.markdown-preview {
+  max-width: 72ch;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.markdown-preview > * + * { margin-top: 0.85em; }
+.markdown-preview h1,
+.markdown-preview h2,
+.markdown-preview h3,
+.markdown-preview h4 { font-weight: 600; line-height: 1.3; margin-top: 1.5em; }
+.markdown-preview h1 { font-size: 1.45em; }
+.markdown-preview h2 { font-size: 1.2em; padding-bottom: 0.25em; border-bottom: 1px solid var(--border); }
+.markdown-preview h3 { font-size: 1.05em; }
+.markdown-preview > :first-child { margin-top: 0; }
+.markdown-preview a { color: var(--syntax-link); text-decoration: underline; text-underline-offset: 2px; }
+.markdown-preview ul { list-style: disc; padding-left: 1.4em; }
+.markdown-preview ol { list-style: decimal; padding-left: 1.4em; }
+.markdown-preview li + li { margin-top: 0.2em; }
+.markdown-preview li > ul,
+.markdown-preview li > ol { margin-top: 0.2em; }
+.markdown-preview blockquote { border-left: 2px solid var(--border); padding-left: 1em; color: var(--muted-foreground); }
+.markdown-preview hr { border-color: var(--border); }
+.markdown-preview :not(pre) > code {
+  background: var(--muted);
+  border-radius: 6px;
+  padding: 0.1em 0.35em;
+  font-size: 0.92em;
+}
+.markdown-preview pre {
+  background: color-mix(in oklch, var(--muted) 70%, transparent);
+  border-radius: 12px;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.markdown-preview table { border-collapse: collapse; font-size: 12px; }
+.markdown-preview th,
+.markdown-preview td { border: 1px solid var(--border); padding: 0.3em 0.6em; text-align: left; vertical-align: top; }
+.markdown-preview th { background: var(--muted); font-weight: 600; }
+.markdown-preview input[type="checkbox"] { margin-right: 0.4em; }
+.markdown-preview img { max-width: 100%; }
+.markdown-preview .frontmatter-table { width: 100%; margin-bottom: 1.5em; }
+.markdown-preview .frontmatter-table th {
+  width: 1%;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+  font-weight: 500;
+  background: transparent;
+}
+.markdown-preview .frontmatter-table td { white-space: pre-wrap; }
