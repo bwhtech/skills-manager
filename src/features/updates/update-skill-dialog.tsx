@@ -6,7 +6,15 @@ import type { SkillSummary, UpdatePreview } from "@shared/api"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
-import { api, errorMessage, previewFailure, useJobMutation, useScopes, useUpdatePreview } from "@/lib/api"
+import {
+  api,
+  errorMessage,
+  previewFailure,
+  useIsBeingUpdated,
+  useJobMutation,
+  useScopes,
+  useUpdatePreview,
+} from "@/lib/api"
 import { plural, scopeLabel } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
@@ -34,6 +42,8 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
   const projects = useScopes().data?.projects
   const preview = useUpdatePreview(skill.id, open)
   const update = useJobMutation(api.runUpdate)
+  // A preview taken while an update of this skill runs predates that update.
+  const running = useIsBeingUpdated(skill.scope, skill.name)
 
   const data = preview.data
   const failure = preview.isError ? previewFailure(preview.error) : null
@@ -45,14 +55,19 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
       {
         onSuccess: ({ jobId }) => {
           onOpenChange(false)
-          showJob(jobId, { previewIds: [skill.id] })
+          showJob(jobId)
         },
         onError: (error) => toast.error(`Could not update ${skill.name}`, { description: errorMessage(error) }),
       }
     )
 
-  const confirmLabel =
-    failure && !failure.blocking ? "Update without preview" : data?.upToDate ? "Update anyway" : "Update"
+  const confirmLabel = running
+    ? "Update running…"
+    : failure && !failure.blocking
+      ? "Update without preview"
+      : data?.upToDate
+        ? "Update anyway"
+        : "Update"
 
   return (
     <UpdateDialogShell open={open} onOpenChange={onOpenChange} initialFocus={cancelRef}>
@@ -72,18 +87,24 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
         )}
       </UpdateDialogBody>
       <UpdateDialogFooter>
-        {failure?.blocking && (
-          <p className="mr-auto min-w-0 text-xs text-destructive max-md:col-span-2">Update is off for this skill.</p>
+        {running ? (
+          <p className="mr-auto min-w-0 text-xs text-muted-foreground max-md:col-span-2">
+            An update of this skill is running. Wait for it to finish.
+          </p>
+        ) : (
+          failure?.blocking && (
+            <p className="mr-auto min-w-0 text-xs text-destructive max-md:col-span-2">Update is off for this skill.</p>
+          )
         )}
         <Button ref={cancelRef} variant="outline" onClick={() => onOpenChange(false)}>
           Cancel
         </Button>
         <Button
           variant={data?.upToDate || (failure && !failure.blocking) ? "secondary" : "default"}
-          disabled={preview.isPending || !!failure?.blocking || update.isPending}
+          disabled={preview.isPending || !!failure?.blocking || update.isPending || running}
           onClick={confirm}
         >
-          {update.isPending ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
+          {update.isPending || running ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
           {confirmLabel}
         </Button>
       </UpdateDialogFooter>

@@ -1,5 +1,6 @@
-import type { SkillOrigin } from "@shared/api"
+import type { SkillOrigin, SkillSummary } from "@shared/api"
 import { Badge } from "@/components/ui/badge"
+import { useIsBeingUpdated } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 const tone: Record<SkillOrigin, string> = {
@@ -27,10 +28,12 @@ export function OriginBadge({ origin, className }: { origin: SkillOrigin; classN
   )
 }
 
-export function UpdateBadge() {
+/** "update", or "Updating…" while an update job for the skill is queued or running. */
+export function UpdateBadge({ skill }: { skill: Pick<SkillSummary, "scope" | "name"> }) {
+  const running = useIsBeingUpdated(skill.scope, skill.name)
   return (
-    <Badge className="h-5 px-1.5 font-normal" title="An update is available">
-      update
+    <Badge className="h-5 px-1.5 font-normal" title={running ? "An update is running" : "An update is available"}>
+      {running ? "Updating…" : "update"}
     </Badge>
   )
 }

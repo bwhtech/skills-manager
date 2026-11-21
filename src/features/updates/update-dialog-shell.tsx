@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from "react"
+import { useCallback, useState, type ReactNode, type RefObject } from "react"
 import {
   Dialog,
   DialogContent,
@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
+import { createDiffScrollSlot, DiffScrollContext, type DiffScrollSlot } from "./diff-scroll"
 
 // Layout shared by the update dialogs. Desktop: a wide dialog, up to 85% of
 // the viewport tall, with a scrolling body and the footer pinned below it.
@@ -55,16 +56,33 @@ export function UpdateDialogHeader({ title, description }: { title: ReactNode; d
   )
 }
 
+/**
+ * The scrolling middle of the dialog. Diffs inside render only the lines near
+ * the viewport: they share one virtualizer bound to this scroll container
+ * (see diff-scroll.ts).
+ */
 export function UpdateDialogBody({ children, className }: { children: ReactNode; className?: string }) {
+  const [slot, setSlot] = useState<DiffScrollSlot | null>(null)
+  const scrollRef = useCallback((root: HTMLDivElement | null) => {
+    if (!root) return
+    const content = root.firstElementChild
+    if (!(content instanceof HTMLElement)) return
+    const { slot, dispose } = createDiffScrollSlot(root, content)
+    setSlot(slot)
+    return dispose
+  }, [])
+
   return (
     <div
+      ref={scrollRef}
       className={cn(
-        "flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain px-6 py-4",
-        "max-md:pr-[max(1rem,env(safe-area-inset-right))] max-md:pl-[max(1rem,env(safe-area-inset-left))]",
-        className
+        "min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4",
+        "max-md:pr-[max(1rem,env(safe-area-inset-right))] max-md:pl-[max(1rem,env(safe-area-inset-left))]"
       )}
     >
-      {children}
+      <div className={cn("flex flex-col gap-4", className)}>
+        <DiffScrollContext.Provider value={slot}>{children}</DiffScrollContext.Provider>
+      </div>
     </div>
   )
 }

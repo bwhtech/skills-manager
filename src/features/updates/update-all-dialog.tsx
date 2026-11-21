@@ -12,9 +12,11 @@ import { Spinner } from "@/components/ui/spinner"
 import {
   api,
   errorMessage,
+  isBeingUpdated,
   previewFailure,
   updatePreviewQuery,
   useJobMutation,
+  useRunningUpdates,
   useScopes,
   useSkills,
   useUpdates,
@@ -25,7 +27,7 @@ import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "./file-changes"
 import { LineCounts, OverwriteWarning, overwritesFiles, summaryText } from "./preview-parts"
-import { PreviewError, PreviewLoading, UpToDateNote } from "./preview-states"
+import { PreviewError, PreviewLoading, TOO_LARGE_LABEL, UpToDateNote } from "./preview-states"
 import { UpdateDialogBody, UpdateDialogFooter, UpdateDialogHeader, UpdateDialogShell } from "./update-dialog-shell"
 
 /** Rendered once in App; ui.openUpdateAll(scope) opens it. */
@@ -49,12 +51,12 @@ export function UpdateAllDialog() {
   )
 }
 
+const RUNNING_LABEL = "Update running…"
+
 interface Row {
   name: string
   /** the folder whose preview the row shows; null if the skill list does not have it */
   skill: SkillSummary | null
-  /** every folder of that name in the scope: their previews go stale after the update */
-  ids: string[]
 }
 
 /**
@@ -71,7 +73,7 @@ function useRows(scope: ScopeKey) {
     return names.map((name) => {
       const matches = owned.filter((skill) => skill.name === name)
       const skill = matches.find((match) => match.realPath.includes("/.agents/skills/")) ?? matches[0] ?? null
-      return { name, skill, ids: matches.map((match) => match.id) }
+      return { name, skill }
     })
   }, [status, skills.data, scope])
   return { rows, loading: !status || skills.isPending }
@@ -86,6 +88,7 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
   /** the user's own choices; rows without one follow their default */
   const [choices, setChoices] = useState<ReadonlyMap<string, boolean>>(new Map())
   const run = useJobMutation(api.runUpdate)
+  const running = useRunningUpdates()
 
   // Fetch a row's preview only once it is expanded (or on "Load all summaries");
   // the shared limiter keeps 3 fetches in flight at most.
@@ -93,20 +96,29 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
     queries: rows.map((row) => updatePreviewQuery(row.skill?.id ?? null, loadAll || expanded.has(row.name))),
   })
 
-  // A skill that skills update would skip (400) or fail on (409) starts unchecked.
-  const isChecked = (row: Row, index: number) => {
-    const choice = choices.get(row.name)
-    if (choice !== undefined) return choice
+  // Why a row cannot be picked: an update of it is queued or running already,
+  // or its preview says skills update would skip it (400) or fail (409).
+  // That wins over the user's own choice.
+  const isRunning = (row: Row) => isBeingUpdated(running, scope, row.name)
+  const blockReason = (row: Row, index: number): string | null => {
+    if (isRunning(row)) return RUNNING_LABEL
     const query = previews[index]
-    return !(query?.isError && previewFailure(query.error).blocking)
+    if (query?.isError) {
+      const failure = previewFailure(query.error)
+      if (failure.blocking) return `Cannot update: ${failure.message}`
+    }
+    return null
   }
+  const isChecked = (row: Row, index: number) => !blockReason(row, index) && (choices.get(row.name) ?? true)
+  const selectable = rows.filter((row, index) => !blockReason(row, index))
   const selected = rows.filter(isChecked)
-  const allChecked = rows.length > 0 && selected.length === rows.length
+  const allChecked = selectable.length > 0 && selected.length === selectable.length
   const someChecked = selected.length > 0 && !allChecked
   const loadedCount = previews.filter((query) => query.isSuccess || query.isError).length
 
   const setChecked = (name: string, checked: boolean) => setChoices((prev) => new Map(prev).set(name, checked))
-  const setAll = (checked: boolean) => setChoices(new Map(rows.map((row) => [row.name, checked])))
+  // Only rows that can be picked: a blocked row keeps no choice to come back with.
+  const setAll = (checked: boolean) => setChoices(new Map(selectable.map((row) => [row.name, checked])))
   const toggleExpanded = (name: string, open: boolean) => {
     if (open) preloadDiffView()
     setExpanded((prev) => {
@@ -117,17 +129,21 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
     })
   }
 
-  const confirm = () =>
+  const confirm = () => {
+    // Checked again here: a blocked row must never be sent, whatever the checkboxes said.
+    const names = rows.filter((row, index) => !blockReason(row, index) && isChecked(row, index)).map((row) => row.name)
+    if (names.length === 0) return
     run.mutate(
-      { scope, names: selected.map((row) => row.name) },
+      { scope, names },
       {
         onSuccess: ({ jobId }) => {
           ui.closeUpdateAll()
-          showJob(jobId, { previewIds: selected.flatMap((row) => row.ids) })
+          showJob(jobId)
         },
         onError: (error) => toast.error("Could not start the update", { description: errorMessage(error) }),
       }
     )
+  }
 
   return (
     <>
@@ -152,10 +168,14 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
                 <Checkbox
                   checked={allChecked}
                   indeterminate={someChecked}
+                  disabled={selectable.length === 0}
                   onCheckedChange={(checked) => setAll(checked)}
                   aria-label="Select all"
                 />
                 {selected.length} of {rows.length} selected
+                {selectable.length < rows.length && (
+                  <span className="text-muted-foreground">· {rows.length - selectable.length} unavailable</span>
+                )}
               </label>
               <div className="ml-auto flex items-center gap-2">
                 <Button
@@ -182,6 +202,8 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
                   row={row}
                   preview={previews[index]}
                   checked={isChecked(row, index)}
+                  blockedReason={blockReason(row, index)}
+                  running={isRunning(row)}
                   onCheckedChange={(checked) => setChecked(row.name, checked)}
                   open={expanded.has(row.name)}
                   onOpenChange={(open) => toggleExpanded(row.name, open)}
@@ -211,18 +233,33 @@ interface SkillRowProps {
   row: Row
   preview: UseQueryResult<UpdatePreview> | undefined
   checked: boolean
+  /** set when the row cannot be picked; the checkbox is off and disabled */
+  blockedReason: string | null
+  /** an update of this skill is queued or running */
+  running: boolean
   onCheckedChange: (checked: boolean) => void
   open: boolean
   onOpenChange: (open: boolean) => void
 }
 
-function SkillRow({ row, preview, checked, onCheckedChange, open, onOpenChange }: SkillRowProps) {
+function SkillRow({ row, preview, checked, blockedReason, running, onCheckedChange, open, onOpenChange }: SkillRowProps) {
   return (
     <li className={cn("rounded-2xl border transition-colors", !checked && "bg-muted/30")}>
       <Collapsible open={open} onOpenChange={onOpenChange}>
         <div className="flex items-stretch">
-          <label className="flex shrink-0 cursor-pointer items-center pr-1 pl-3 pointer-coarse:pr-2 pointer-coarse:pl-3.5">
-            <Checkbox checked={checked} onCheckedChange={onCheckedChange} aria-label={`Update ${row.name}`} />
+          <label
+            className={cn(
+              "flex shrink-0 items-center pr-1 pl-3 pointer-coarse:pr-2 pointer-coarse:pl-3.5",
+              blockedReason ? "cursor-not-allowed" : "cursor-pointer"
+            )}
+            title={blockedReason ?? undefined}
+          >
+            <Checkbox
+              checked={checked}
+              disabled={!!blockedReason}
+              onCheckedChange={onCheckedChange}
+              aria-label={blockedReason ? `Update ${row.name}: ${blockedReason}` : `Update ${row.name}`}
+            />
           </label>
           <CollapsibleTrigger
             className={cn(
@@ -244,7 +281,7 @@ function SkillRow({ row, preview, checked, onCheckedChange, open, onOpenChange }
                 {row.skill.source.source}
               </span>
             )}
-            <RowStatus row={row} preview={preview} />
+            <RowStatus row={row} preview={preview} running={running} />
           </CollapsibleTrigger>
         </div>
         <CollapsibleContent>
@@ -258,8 +295,23 @@ function SkillRow({ row, preview, checked, onCheckedChange, open, onOpenChange }
 }
 
 /** The right side of a row: the summary once the preview loaded. */
-function RowStatus({ row, preview }: { row: Row; preview: UseQueryResult<UpdatePreview> | undefined }) {
+function RowStatus({
+  row,
+  preview,
+  running,
+}: {
+  row: Row
+  preview: UseQueryResult<UpdatePreview> | undefined
+  running: boolean
+}) {
   const className = "ml-auto flex min-w-0 shrink items-center gap-2 pl-2 text-xs text-muted-foreground max-sm:basis-full max-sm:pl-5.5"
+  if (running) {
+    return (
+      <span className={className}>
+        <Spinner className="size-3.5" /> {RUNNING_LABEL}
+      </span>
+    )
+  }
   if (!row.skill) return <span className={className}>No preview: skill folder not found</span>
   // Not fetched yet: it loads when the row opens.
   if (!preview || (preview.fetchStatus === "idle" && preview.isPending)) return null
@@ -271,10 +323,12 @@ function RowStatus({ row, preview }: { row: Row; preview: UseQueryResult<UpdateP
     )
   }
   if (preview.isError) {
-    const { blocking, message } = previewFailure(preview.error)
+    const { blocking, tooLarge, message } = previewFailure(preview.error)
     return (
       <span className={cn(className, blocking && "text-destructive")} title={message}>
-        <span className="truncate">{blocking ? `Cannot update: ${message}` : "Preview failed"}</span>
+        <span className="truncate">
+          {blocking ? `Cannot update: ${message}` : tooLarge ? TOO_LARGE_LABEL : "Preview failed"}
+        </span>
       </span>
     )
   }

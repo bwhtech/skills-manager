@@ -40,14 +40,15 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
   const folder = basename(skill.realPath)
   const validate = useCallback((text: string) => validateSkillMd(text, folder), [folder])
 
-  const save = async (content: string, { baseHash, force }: SaveOptions) => {
-    const result = await api.saveSkillMd(skill.id, { content, baseHash, force })
+  const save = (content: string, { baseHash, force }: SaveOptions) =>
+    api.saveSkillMd(skill.id, { content, baseHash, force })
+
+  const saved = () => {
     void client.invalidateQueries({ queryKey: keys.skill(skill.id) })
     // The skill can be listed in several scopes; refresh every list.
     void client.invalidateQueries({ queryKey: ["skills"] })
     // The update preview diffs against the folder on disk.
     resetUpdatePreviews(client, [skill.id])
-    return result
   }
 
   const reload = async () => {
@@ -70,6 +71,7 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
       warning={skill.origin === "npx" ? OVERWRITE_WARNING : undefined}
       validate={validate}
       onSave={skill.editable ? save : undefined}
+      onSaved={saved}
       onReload={reload}
       onDirtyChange={onDirtyChange}
     />

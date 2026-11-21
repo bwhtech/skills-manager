@@ -1,6 +1,6 @@
 import { useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { PinIcon, PlusSignIcon, RefreshIcon, UserIcon } from "@hugeicons/core-free-icons"
+import { ArrowUp02Icon, PinIcon, PlusSignIcon, RefreshIcon, UserIcon } from "@hugeicons/core-free-icons"
 import { toast } from "sonner"
 import type { ProjectInfo } from "@shared/api"
 import { Button } from "@/components/ui/button"
@@ -25,8 +25,9 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, errorMessage, useScopes, useScopesMutation, useSkills } from "@/lib/api"
-import { basename, timeAgo, tildify } from "@/lib/format"
+import { basename, plural, timeAgo, tildify } from "@/lib/format"
 import { navigate, usePlace } from "@/lib/hash-state"
+import { useUpdateCounts } from "@/features/updates/update-status"
 import { PinProjectDialog } from "./pin-project-dialog"
 import { ProjectMenu } from "./project-menu"
 
@@ -54,6 +55,7 @@ export function AppSidebar() {
   const openScope = useOpenScope()
   const scopes = useScopes()
   const userSkills = useSkills("user")
+  const updateCounts = useUpdateCounts()
   const [pinOpen, setPinOpen] = useState(false)
   const [filter, setFilter] = useState("")
   const rescan = useScopesMutation(api.rescan)
@@ -75,9 +77,14 @@ export function AppSidebar() {
         <SidebarGroup>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton isActive={scope === "user"} onClick={() => openScope("user")} className={COARSE_ROW}>
+              <SidebarMenuButton
+                isActive={scope === "user"}
+                onClick={() => openScope("user")}
+                className={`pr-11! ${COARSE_ROW}`}
+              >
                 <HugeiconsIcon icon={UserIcon} strokeWidth={2} />
                 <span>User</span>
+                <UpdateCount count={updateCounts.get("user")} />
               </SidebarMenuButton>
               {userSkills.data && <SidebarMenuBadge className={COARSE_SIDE}>{userSkills.data.length}</SidebarMenuBadge>}
             </SidebarMenuItem>
@@ -125,6 +132,7 @@ export function AppSidebar() {
                   active={scope === project.path}
                   home={scopes.data?.home}
                   duplicate={(nameCounts.get(project.name) ?? 0) > 1}
+                  updates={updateCounts.get(project.path)}
                   onOpen={openScope}
                 />
               ))}
@@ -166,10 +174,30 @@ interface ProjectItemProps {
   home?: string
   /** another project has the same name: show the parent folder too */
   duplicate: boolean
+  /** skills with an update in this project */
+  updates?: number
   onOpen: (scope: string) => void
 }
 
-function ProjectItem({ project, active, home, duplicate, onOpen }: ProjectItemProps) {
+/**
+ * A small green "↑ 3" at the end of a scope's row: skills with an update
+ * there. The arrow tells it apart from the skill count next to it.
+ */
+function UpdateCount({ count }: { count?: number }) {
+  if (!count) return null
+  return (
+    <span
+      className="mr-1 ml-auto flex shrink-0 items-center gap-0.5 rounded-full bg-primary py-px pr-1.5 pl-1 text-[0.625rem] leading-4 font-medium text-primary-foreground tabular-nums"
+      title={plural(count, "update")}
+      aria-label={plural(count, "update")}
+    >
+      <HugeiconsIcon icon={ArrowUp02Icon} strokeWidth={2.5} className="size-2.5!" aria-hidden />
+      {count}
+    </span>
+  )
+}
+
+function ProjectItem({ project, active, home, duplicate, updates, onOpen }: ProjectItemProps) {
   const parent = basename(project.path.slice(0, project.path.length - project.name.length - 1))
   return (
     <SidebarMenuItem>
@@ -190,6 +218,7 @@ function ProjectItem({ project, active, home, duplicate, onOpen }: ProjectItemPr
             {project.name}
             {duplicate && <span className="ml-1.5 text-xs text-muted-foreground">{parent}/</span>}
           </span>
+          <UpdateCount count={updates} />
         </TooltipTrigger>
         <TooltipContent side="right" className="font-mono">
           {tildify(project.path, home)}

@@ -17,6 +17,22 @@ export interface Version {
   content: string
   hash: string
   mtimeMs: number
+  /**
+   * requestGeneration() taken right before the fetch that loaded this version
+   * was sent. Tells a response that may predate a save (obsolete) from the
+   * state of the disk after it. Unset: unknown, judged by hash (see isObsolete).
+   */
+  generation?: number
+}
+
+let clock = 0
+
+/**
+ * A number from one clock shared by fetches and saves. Take it right before
+ * sending a document fetch and put it on the loaded Version.
+ */
+export function requestGeneration(): number {
+  return ++clock
 }
 
 export interface DraftState {
@@ -35,9 +51,16 @@ export interface SaveStart {
   baseHash: string
 }
 
+/** The last save that landed, to judge responses that arrive after it. */
+interface LastSave {
+  /** requestGeneration() when the save response arrived: fetches sent later see it on disk */
+  generation: number
+  /** the base the save replaced: what a fetch sent before it can still bring back */
+  replacedHash: string
+}
+
 interface Entry extends DraftState {
-  /** hashes this draft was based on: its first base, then each save */
-  lineage: string[]
+  lastSave: LastSave | null
   /** editors showing this document now */
   mounts: number
 }
@@ -82,11 +105,36 @@ function update(key: string, patch: Partial<Entry>) {
 }
 
 /**
+ * A loaded version that says nothing about the disk now: it was fetched
+ * before the last save landed, so the save replaced it. Without a generation,
+ * only the base that save replaced counts as obsolete (the cached version an
+ * editor still holds while the refetch runs). Any other version is the disk
+ * now, including a rollback to a version this draft had before.
+ */
+function isObsolete(entry: Entry, file: Version): boolean {
+  const save = entry.lastSave
+  if (!save) return false
+  if (file.generation !== undefined) return file.generation < save.generation
+  return file.hash === save.replacedHash
+}
+
+/**
+ * What a loaded version that differs from the base means for the draft:
+ * "keep" (it predates a save, or a save runs and its answer decides),
+ * "adopt" (the disk changed and the draft is clean) or "conflict" (the disk
+ * changed under unsaved edits).
+ */
+function judge(entry: Entry, file: Version): "keep" | "adopt" | "conflict" {
+  if (file.hash === entry.base.hash || entry.saving || isObsolete(entry, file)) return "keep"
+  return isDraftDirty(entry) ? "conflict" : "adopt"
+}
+
+/**
  * The document an editor is about to show, with `file` as loaded now. A kept
- * draft is restored when `file` is a version it was based on (its first base
- * or one of its saves). A draft based on another version is stale: the file
- * changed on disk meanwhile. It is kept and marked as a conflict, so the
- * editor asks (reload or overwrite) instead of dropping the edits silently.
+ * draft is restored when `file` is its base, or a version its last save
+ * replaced. A draft based on another version is stale: the file changed on
+ * disk meanwhile. It is kept and marked as a conflict, so the editor asks
+ * (reload or overwrite) instead of dropping the edits silently.
  * Idempotent: safe to call from a React state initializer.
  */
 export function openDraft(key: string, file: Version): DraftState {
@@ -97,22 +145,20 @@ export function openDraft(key: string, file: Version): DraftState {
       content: file.content,
       saving: null,
       conflict: false,
-      lineage: [file.hash],
+      lastSave: null,
       mounts: 0,
     }
     entries.set(key, fresh)
     return fresh
   }
-  if (entry.lineage.includes(file.hash) || entry.conflict) return entry
-  if (!isDraftDirty(entry) && !entry.saving) {
-    // Nothing to lose: start over from the file as loaded.
-    const fresh: Entry = { ...entry, base: file, content: file.content, lineage: [file.hash] }
-    entries.set(key, fresh)
-    return fresh
-  }
-  const stale: Entry = { ...entry, conflict: true }
-  entries.set(key, stale)
-  return stale
+  if (entry.conflict) return entry
+  const verdict = judge(entry, file)
+  if (verdict === "keep") return entry
+  // Nothing to lose: start over from the file as loaded. Or keep the edits and ask.
+  const next: Entry =
+    verdict === "adopt" ? { ...entry, base: file, content: file.content } : { ...entry, conflict: true }
+  entries.set(key, next)
+  return next
 }
 
 /**
@@ -145,21 +191,23 @@ export function editDraft(key: string, content: string) {
 }
 
 /**
- * A newer version was loaded (a refetch, or Reload after a conflict). Takes it
- * as the base and the content; with `keepDraft`, only when nothing is lost.
+ * A version was loaded (a refetch, or Reload after a conflict). Without
+ * options it becomes the base and the content. With `keepDraft` (a refetch),
+ * a version that predates the last save is ignored; a newer one replaces a
+ * clean document, and under unsaved edits it raises the conflict.
  */
 export function rebaseDraft(key: string, file: Version, options: { keepDraft?: boolean } = {}) {
   const entry = entries.get(key)
   if (!entry) return
   if (options.keepDraft) {
-    if (isDraftDirty(entry) || entry.saving || entry.lineage.includes(file.hash)) return
+    const verdict = judge(entry, file)
+    if (verdict === "keep") return
+    if (verdict === "conflict") {
+      if (!entry.conflict) update(key, { conflict: true })
+      return
+    }
   }
-  update(key, {
-    base: file,
-    content: file.content,
-    lineage: [...entry.lineage, file.hash],
-    conflict: false,
-  })
+  update(key, { base: file, content: file.content, conflict: false })
 }
 
 /** Starts a save of the current content. Null when one is running already. */
@@ -173,14 +221,16 @@ export function beginSave(key: string): SaveStart | null {
 
 /**
  * The save wrote `start.content`: that is the new base. The draft stays
- * dirty only if it was edited after the save started.
+ * dirty only if it was edited after the save started. Call it as soon as the
+ * save response arrives, before anything refetches the document: fetches sent
+ * after this call count as the disk after the save.
  */
 export function finishSave(key: string, start: SaveStart, saved: { hash: string; mtimeMs: number }) {
   const entry = entries.get(key)
   if (!entry || entry.saving !== start) return
   update(key, {
     base: { content: start.content, hash: saved.hash, mtimeMs: saved.mtimeMs },
-    lineage: [...entry.lineage, saved.hash],
+    lastSave: { generation: requestGeneration(), replacedHash: start.baseHash },
     saving: null,
     conflict: false,
   })

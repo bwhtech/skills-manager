@@ -23,13 +23,12 @@ import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { modKey } from "@/components/editor/editor-toolbar"
-import { UpdateStatus, useUpdateActions } from "@/features/updates/update-status"
+import { UpdateOverview, UpdateStatus, useUpdateActions } from "@/features/updates/update-status"
 import { useIsDesktop } from "@/hooks/use-media-query"
 import { useJobs, useScopes } from "@/lib/api"
 import { plural, scopeLabel, tildify } from "@/lib/format"
 import { navigate, usePlace, type MainTab } from "@/lib/hash-state"
 import { ui } from "@/lib/ui-store"
-import { cn } from "@/lib/utils"
 import { ThemeToggle, useThemeToggle } from "./theme-toggle"
 
 export function AppHeader() {
@@ -113,7 +112,15 @@ function PhoneHeader() {
   const { scope, tab, name, running } = useHeaderData()
   const updates = useUpdateActions(scope)
   const theme = useThemeToggle()
-  const attention = running > 0 || updates.total > 0
+  // The dot means "updates here"; a running job shows a spinning ring instead.
+  const hasUpdates = updates.inScope.length > 0
+  const label = [
+    "More actions",
+    hasUpdates && plural(updates.inScope.length, "update"),
+    running > 0 && `${running} job${running === 1 ? "" : "s"} running`,
+  ]
+    .filter(Boolean)
+    .join(", ")
 
   return (
     <header className="shrink-0 border-b pt-[env(safe-area-inset-top)]">
@@ -130,28 +137,32 @@ function PhoneHeader() {
                 variant="ghost"
                 size="icon"
                 className="relative size-11"
-                aria-label={attention ? "More actions, needs attention" : "More actions"}
+                aria-label={label}
               />
             }
           >
             <HugeiconsIcon icon={MoreVerticalIcon} strokeWidth={2} />
-            {attention && (
+            {running > 0 ? (
               <span
-                className={cn(
-                  "absolute top-2.5 right-2.5 size-2 rounded-full bg-primary",
-                  running > 0 && "animate-pulse"
-                )}
+                aria-hidden
+                className="absolute top-2 right-2 size-2.5 animate-spin rounded-full border-2 border-primary border-t-transparent motion-reduce:animate-none"
               />
+            ) : (
+              hasUpdates && <span aria-hidden className="absolute top-2.5 right-2.5 size-2 rounded-full bg-primary" />
             )}
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-64">
+          <DropdownMenuContent align="end" className="w-72">
             <DropdownMenuItem disabled={updates.checking} onClick={updates.refresh}>
               {updates.checking ? <Spinner /> : <HugeiconsIcon icon={RefreshIcon} strokeWidth={2} />}
               <span className="flex min-w-0 flex-col">
                 <span>{updates.checking ? "Checking for updates…" : "Check for updates"}</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  {updates.headline}
+                  {updates.otherLine && ` · ${updates.otherLine}`}
+                </span>
                 <span className="truncate text-xs font-normal text-muted-foreground">
-                  {updates.total > 0 ? `${plural(updates.total, "update")} · ` : ""}
                   {updates.summary}
+                  {updates.errorLine && <span className="text-destructive"> · {updates.errorLine}</span>}
                 </span>
               </span>
             </DropdownMenuItem>
@@ -160,6 +171,12 @@ function PhoneHeader() {
                 <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />
                 <span className="truncate">Update all {updates.inScope.length} in {name}…</span>
               </DropdownMenuItem>
+            )}
+            {(updates.others.length > 0 || updates.errorLine) && (
+              <>
+                <DropdownMenuSeparator />
+                <UpdateOverview actions={updates} compact />
+              </>
             )}
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => ui.openJobs()}>

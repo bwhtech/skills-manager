@@ -38,7 +38,8 @@ export interface DocumentEditorProps {
   /** file path; picks the language */
   path: string
   title: string
-  file: FileContent
+  /** as loaded; `generation` (lib/drafts.ts) tells a late, pre-save response from the disk now */
+  file: FileContent & { generation?: number }
   /** set for read-only files: why they are read-only */
   readOnlyReason?: string
   /** fixed warning line under the toolbar */
@@ -46,7 +47,10 @@ export interface DocumentEditorProps {
   /** extra badges in the toolbar */
   meta?: ReactNode
   validate?: (text: string) => string[]
+  /** writes the file; refetch nothing here, do that in onSaved */
   onSave?: (content: string, options: SaveOptions) => Promise<SaveResponse>
+  /** after a save landed in the draft store: refetch what it changed */
+  onSaved?: () => void
   /** load the file from disk again */
   onReload: () => Promise<FileContent | undefined>
   onDirtyChange?: (dirty: boolean) => void
@@ -98,7 +102,9 @@ export default function DocumentEditor(props: DocumentEditorProps) {
     try {
       const result = await props.onSave(start.content, { baseHash: start.baseHash, force })
       // Lands in the store, so an editor that replaced this one sees it too.
+      // Before any refetch: fetches sent from here on count as the disk after the save.
       finishSave(draftKey, start, result)
+      props.onSaved?.()
       toast.success(`Saved ${title}`)
     } catch (error) {
       failSave(draftKey, start, { conflict: isConflict(error) })

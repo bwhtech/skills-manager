@@ -10,6 +10,7 @@ import {
   isDraftDirty,
   openDraft,
   rebaseDraft,
+  requestGeneration,
   resetDrafts,
   retainDraft,
   type Version,
@@ -165,13 +166,13 @@ describe("saves", () => {
 })
 
 describe("rebase", () => {
-  test("a refetch replaces a clean document, not a draft", () => {
+  test("a refetch replaces a clean document; under a draft it raises the conflict", () => {
     mount(v1)
     rebaseDraft(KEY, v2, { keepDraft: true })
     expect(getDraft(KEY)?.base).toEqual(v2)
     editDraft(KEY, "mine\n")
     rebaseDraft(KEY, { content: "three\n", hash: "h4", mtimeMs: 4 }, { keepDraft: true })
-    expect(getDraft(KEY)).toMatchObject({ base: v2, content: "mine\n" })
+    expect(getDraft(KEY)).toMatchObject({ base: v2, content: "mine\n", conflict: true })
   })
 
   test("a late refetch of an older version does not roll back a save", () => {
@@ -190,5 +191,86 @@ describe("rebase", () => {
     failSave(KEY, start, { conflict: true })
     rebaseDraft(KEY, v2)
     expect(getDraft(KEY)).toMatchObject({ base: v2, content: v2.content, conflict: false })
+  })
+})
+
+/** A version as a fetch sent now would load it. */
+function fetched(file: Version): Version {
+  return { ...file, generation: requestGeneration() }
+}
+
+describe("rollback on disk after a save (A -> save B -> restore A)", () => {
+  /** Edit and save B over v1 (A); returns a fetch of A sent while the save ran. */
+  function saveB() {
+    mount(fetched(v1))
+    editDraft(KEY, "B\n")
+    const start = beginSave(KEY)!
+    const early = fetched(v1) // sent before the save response arrived
+    finishSave(KEY, start, { hash: "hB", mtimeMs: 3 })
+    return early
+  }
+
+  test("a fetch sent before the save landed is ignored", () => {
+    const early = saveB()
+    rebaseDraft(KEY, early, { keepDraft: true })
+    expect(getDraft(KEY)).toMatchObject({ base: { hash: "hB" }, content: "B\n", conflict: false })
+  })
+
+  test("a fetch sent after the save that returns A is a real change: a clean draft adopts it", () => {
+    saveB()
+    rebaseDraft(KEY, fetched({ content: "B\n", hash: "hB", mtimeMs: 3 }), { keepDraft: true })
+    // Restored to A on disk, then refetched.
+    rebaseDraft(KEY, fetched(v1), { keepDraft: true })
+    expect(getDraft(KEY)).toMatchObject({ base: v1, content: v1.content, conflict: false })
+    expect(isDraftDirty(getDraft(KEY))).toBe(false)
+    // The leave guard has nothing to ask about.
+    expect(hasDirtyDrafts()).toBe(false)
+  })
+
+  test("the restore can be the first fetch after the save, too", () => {
+    saveB()
+    rebaseDraft(KEY, fetched(v1), { keepDraft: true })
+    expect(getDraft(KEY)?.base.hash).toBe(v1.hash)
+  })
+
+  test("a dirty draft gets the conflict instead", () => {
+    saveB()
+    editDraft(KEY, "B and more\n")
+    rebaseDraft(KEY, fetched(v1), { keepDraft: true })
+    expect(getDraft(KEY)).toMatchObject({ base: { hash: "hB" }, content: "B and more\n", conflict: true })
+    expect(hasDirtyDrafts()).toBe(true)
+  })
+
+  test("openDraft (a remount) applies the same rules", () => {
+    const early = saveB()
+    const desktop = { release: retainDraft(KEY, v1) }
+    // The cached pre-save version: restored as is.
+    expect(openDraft(KEY, early)).toMatchObject({ base: { hash: "hB" }, conflict: false })
+    // The disk after a restore to A: a clean draft starts over from it.
+    expect(openDraft(KEY, fetched(v1))).toMatchObject({ base: v1, content: v1.content, conflict: false })
+    desktop.release()
+  })
+
+  test("openDraft on a dirty draft after a restore marks the conflict", () => {
+    saveB()
+    editDraft(KEY, "B2\n")
+    expect(openDraft(KEY, fetched(v1))).toMatchObject({ content: "B2\n", conflict: true })
+  })
+
+  test("without a generation, only the version the save replaced counts as late", () => {
+    saveB()
+    rebaseDraft(KEY, v1, { keepDraft: true }) // the replaced base: ignored
+    expect(getDraft(KEY)?.base.hash).toBe("hB")
+    rebaseDraft(KEY, v2, { keepDraft: true }) // anything else is the disk now
+    expect(getDraft(KEY)?.base).toEqual(v2)
+  })
+
+  test("a refetch during a save waits for the save's answer", () => {
+    mount(v1)
+    editDraft(KEY, "x\n")
+    beginSave(KEY)
+    rebaseDraft(KEY, fetched(v2), { keepDraft: true })
+    expect(getDraft(KEY)).toMatchObject({ base: v1, content: "x\n", conflict: false })
+    expect(openDraft(KEY, fetched(v2)).conflict).toBe(false)
   })
 })

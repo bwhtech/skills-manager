@@ -1,7 +1,13 @@
 import type { Stats } from "node:fs"
 import { lstat, mkdir, rename, rm, rmdir, unlink } from "node:fs/promises"
 import { basename, dirname, join, relative, resolve } from "node:path"
-import type { InstallRequest, Job, UpdateRunRequest } from "../shared/api.ts"
+import {
+  updateTargetsOverlap,
+  type InstallRequest,
+  type Job,
+  type UpdateRunRequest,
+  type UpdateTarget,
+} from "../shared/api.ts"
 import type { SkillsCli } from "./cli/skills-cli.ts"
 import { config } from "./config.ts"
 import {
@@ -9,13 +15,13 @@ import {
   type IndexedSkill,
   type SkillPlacement,
 } from "./discovery/skill-index.ts"
-import { forbidden } from "./lib/errors.ts"
+import { forbidden, HttpError } from "./lib/errors.ts"
 import { isInside, realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
 
 export interface ActionHooks {
-  /** after an update job; names empty = every skill in the scope */
-  afterUpdate?: (scope: string, names: string[]) => void
+  /** after an update job, whatever the outcome; names empty = every skill in the scope */
+  afterUpdate?: (scope: string, names: string[], succeeded: boolean) => void
 }
 
 /** Builds and queues the jobs that change installed skills. */
@@ -46,9 +52,21 @@ export class SkillActions {
     )
   }
 
+  /** 409 update_in_progress when a queued or running update job overlaps. */
   update(
     req: Required<Pick<UpdateRunRequest, "scope">> & { names: string[] }
   ): Job {
+    const target: UpdateTarget = { scope: req.scope, names: req.names }
+    const busy = this.jobs
+      .unfinished()
+      .find((j) => j.update && updateTargetsOverlap(j.update, target))
+    if (busy)
+      throw new HttpError(
+        409,
+        "update_in_progress",
+        `An update of the same skills is already queued or running: ${busy.title}`,
+        { jobId: busy.id }
+      )
     const args = [
       "update",
       ...req.names,
@@ -61,7 +79,9 @@ export class SkillActions {
       `Update ${what} (${scopeLabel(req.scope)})`,
       args,
       req.scope,
-      () => this.hooks.afterUpdate?.(req.scope, req.names)
+      (job) =>
+        this.hooks.afterUpdate?.(req.scope, req.names, job.status === "success"),
+      target
     )
   }
 
@@ -96,7 +116,8 @@ export class SkillActions {
     title: string,
     args: string[],
     scope: string,
-    onDone?: () => void
+    onDone?: (job: Job) => void,
+    update?: UpdateTarget
   ): Job {
     const cwd = scope === "user" ? config.home : scope
     return this.jobs.enqueue({
@@ -104,6 +125,7 @@ export class SkillActions {
       title,
       command: this.cli.display(args),
       cwd,
+      update,
       onDone,
       run: async (log) => {
         const { exitCode, timedOut } = await this.cli.stream(

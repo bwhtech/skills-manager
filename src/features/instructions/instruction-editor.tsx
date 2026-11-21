@@ -33,11 +33,8 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
     )
   }
 
-  const save = async (text: string, { baseHash, force }: SaveOptions) => {
-    const result = await api.saveInstruction(file.id, { content: text, baseHash, force })
-    void client.invalidateQueries({ queryKey: keys.instruction(file.id) })
-    return result
-  }
+  const save = (text: string, { baseHash, force }: SaveOptions) =>
+    api.saveInstruction(file.id, { content: text, baseHash, force })
 
   return (
     <Suspense fallback={<EditorSkeleton />}>
@@ -54,6 +51,7 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
           </>
         }
         onSave={save}
+        onSaved={() => void client.invalidateQueries({ queryKey: keys.instruction(file.id) })}
         onReload={async () => (await content.refetch()).data}
         onDirtyChange={onDirtyChange}
       />

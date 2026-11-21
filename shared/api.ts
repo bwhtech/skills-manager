@@ -217,7 +217,11 @@ export interface UpdateStatus {
 // POST /api/updates/check      -> UpdateStatus  (starts a background check, returns at once)
 // POST /api/updates/run  UpdateRunRequest -> JobRef
 //   Runs `skills update [names...] -y` with -g (user) or -p (project, cwd = project).
-//   After success the server re-runs the check.
+//   409 (error "update_in_progress", extra field jobId) when a queued or running update job
+//   overlaps: same scope and a shared name, where names omitted means every skill in the scope.
+//   When the job succeeds, the server drops its (scope, name) pairs from UpdateStatus.available
+//   at once (names omitted: every name in the scope), so the skill list stops flagging them.
+//   Whatever the outcome, it then re-runs the check in the background.
 
 export interface UpdateRunRequest {
   scope: ScopeKey
@@ -321,6 +325,13 @@ export interface Job {
   startedAt: string
   endedAt: string | null
   log: string[] // output lines, ANSI stripped; stdout and stderr merged
+  /** update jobs only: what they update (names empty = every skill in the scope) */
+  update?: UpdateTarget
+}
+
+export interface UpdateTarget {
+  scope: ScopeKey
+  names: string[]
 }
 
 // GET /api/jobs              -> Job[]  (newest first, last 50, kept in memory)
@@ -343,4 +354,16 @@ export function decodeId(id: string): string {
   const b64 = id.replace(/-/g, "+").replace(/_/g, "/")
   const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4))
   return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)))
+}
+
+/**
+ * Two update runs touch the same skill: same scope, and a shared name or
+ * either one updates every skill in the scope (names empty). Names compare
+ * without case.
+ */
+export function updateTargetsOverlap(a: UpdateTarget, b: UpdateTarget): boolean {
+  if (a.scope !== b.scope) return false
+  if (a.names.length === 0 || b.names.length === 0) return true
+  const names = new Set(a.names.map((name) => name.toLowerCase()))
+  return b.names.some((name) => names.has(name.toLowerCase()))
 }

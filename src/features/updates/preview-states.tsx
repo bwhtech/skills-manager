@@ -6,6 +6,9 @@ import { Spinner } from "@/components/ui/spinner"
 import { previewFailure } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
+/** 413 preview_too_large: shown as a note, not as a failure. */
+export const TOO_LARGE_LABEL = "Preview too large to show — update still possible"
+
 export function PreviewLoading({ className }: { className?: string }) {
   return (
     <div className={cn("flex flex-col gap-3", className)} aria-busy="true">
@@ -22,7 +25,9 @@ export function PreviewLoading({ className }: { className?: string }) {
 
 /**
  * A failed preview. 400 and 409 mean the update cannot run (the caller disables
- * Confirm); 502, 504 and the rest are fetch problems that a retry may fix.
+ * Confirm). 413 means only the preview is too large: the update can still run,
+ * and a retry would fail the same way. 502, 504 and the rest are fetch
+ * problems that a retry may fix.
  */
 export function PreviewError({
   error,
@@ -35,10 +40,13 @@ export function PreviewError({
   retrying: boolean
   className?: string
 }) {
-  const { status, message, blocking } = previewFailure(error)
+  const { status, message, blocking, tooLarge } = previewFailure(error)
+  const retryable = !blocking && !tooLarge
   const title = blocking
     ? "This skill cannot be updated"
-    : status === 504
+    : tooLarge
+      ? TOO_LARGE_LABEL
+      : status === 504
       ? "Fetching upstream timed out"
       : status === 502
         ? "Could not fetch upstream"
@@ -60,11 +68,11 @@ export function PreviewError({
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         <span className="font-medium">{title}</span>
         <span className="text-xs break-words text-muted-foreground">{message}</span>
-        {!blocking && (
+        {retryable && (
           <span className="text-xs text-muted-foreground">You can retry, or update without a preview.</span>
         )}
       </div>
-      {!blocking && (
+      {retryable && (
         <Button variant="outline" size="sm" className="shrink-0" disabled={retrying} onClick={onRetry}>
           {retrying ? <Spinner /> : <HugeiconsIcon icon={RefreshIcon} strokeWidth={2} />}
           Retry

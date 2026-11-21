@@ -7,6 +7,8 @@ export interface JobSpec {
   title: string
   command: string
   cwd: string
+  /** update jobs: what they update, so overlapping runs can be refused */
+  update?: Job["update"]
   /** does the work and returns an exit code */
   run: (log: JobLog) => Promise<number>
   /** called once the job has finished, whatever the outcome */
@@ -43,6 +45,7 @@ export class JobManager {
       startedAt: new Date().toISOString(),
       endedAt: null,
       log: [],
+      ...(spec.update ? { update: spec.update } : {}),
     }
     this.jobs.unshift(job)
     this.prune()
@@ -55,6 +58,11 @@ export class JobManager {
 
   list(): Job[] {
     return this.jobs.slice(0, KEEP)
+  }
+
+  /** Jobs that are queued or running (both have status "running"). */
+  unfinished(): Job[] {
+    return this.jobs.filter((j) => j.status === "running")
   }
 
   get(id: string): Job | undefined {
@@ -83,8 +91,8 @@ export class JobManager {
     job.status = code === 0 ? "success" : "error"
     job.endedAt = new Date().toISOString()
     this.active--
-    this.emit(job.id, { type: "done", job })
-    this.listeners.delete(job.id)
+    // The hooks first: a client that hears "done" and refetches already sees
+    // what they changed (e.g. the pruned update status).
     for (const done of [spec.onDone, this.onFinished]) {
       try {
         done?.(job)
@@ -92,6 +100,8 @@ export class JobManager {
         console.error(err)
       }
     }
+    this.emit(job.id, { type: "done", job })
+    this.listeners.delete(job.id)
   }
 
   private append(job: Job, line: string): void {

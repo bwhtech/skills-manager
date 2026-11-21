@@ -16,8 +16,6 @@ export interface LiveJob {
 
 const live = new Map<string, LiveJob>()
 const sources = new Map<string, EventSource>()
-/** Skill ids whose update previews a job makes stale, set by whoever started it. */
-const previewIdsByJob = new Map<string, string[]>()
 const listeners = new Set<() => void>()
 
 function emit() {
@@ -65,11 +63,10 @@ function parseLine(data: string) {
 
 function onFinished(job: Job) {
   invalidateAfterJob(queryClient)
-  const previewIds = previewIdsByJob.get(job.id)
-  previewIdsByJob.delete(job.id)
-  // An update or install started elsewhere can change any folder: drop every preview.
-  if (previewIds) resetUpdatePreviews(queryClient, previewIds)
-  else if (job.kind !== "remove") resetUpdatePreviews(queryClient)
+  // An update or install, finished or failed, can change any folder of that
+  // name: the CLI updates by name, and a name can have several folders
+  // (~/.agents/skills/foo and ~/.claude/skills/foo). Drop every preview.
+  if (job.kind !== "remove") resetUpdatePreviews(queryClient)
   const action = { label: "Show log", onClick: () => ui.openJobs(job.id) }
   if (job.status === "success") {
     toast.success(job.title, { description: "Finished", action })
@@ -90,12 +87,8 @@ export function useLiveJob(jobId: string | null): LiveJob | null {
   return useSyncExternalStore(subscribe, () => (jobId ? (live.get(jobId) ?? null) : null))
 }
 
-/**
- * Start a job's stream and show it in the jobs drawer.
- * previewIds: the skills it updates, whose update previews reset when it ends.
- */
-export function showJob(jobId: string, options: { previewIds?: string[] } = {}) {
-  if (options.previewIds) previewIdsByJob.set(jobId, options.previewIds)
+/** Start a job's stream and show it in the jobs drawer. */
+export function showJob(jobId: string) {
   watchJob(jobId)
   ui.openJobs(jobId)
 }

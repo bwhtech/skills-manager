@@ -3,6 +3,7 @@ import {
   queryOptions,
   useMutation,
   useQuery,
+  type QueryClient,
   useQueryClient,
 } from "@tanstack/react-query"
 import {
@@ -26,7 +27,10 @@ import {
   type UpdatePreview,
   type UpdateRunRequest,
   type UpdateStatus,
+  type UpdateTarget,
+  updateTargetsOverlap,
 } from "@shared/api"
+import { requestGeneration } from "./drafts"
 
 /** A non-2xx response, with the parsed ApiError body. */
 export class HttpError extends Error {
@@ -84,6 +88,13 @@ async function readError(response: Response) {
 
 const q = (params: Record<string, string>) => new URLSearchParams(params).toString()
 
+/** A file an editor can save, stamped with the request generation of its fetch (lib/drafts.ts). */
+export type LoadedFile = FileContent & { generation: number }
+
+function loaded(file: FileContent, generation: number): LoadedFile {
+  return { ...file, generation }
+}
+
 export const api = {
   scopes: () => request<ScopesResponse>("GET", "/api/scopes"),
   rescan: () => request<ScopesResponse>("POST", "/api/projects/rescan"),
@@ -93,7 +104,11 @@ export const api = {
   agents: () => request<AgentsResponse>("GET", "/api/agents"),
 
   skills: (scope: ScopeKey) => request<SkillSummary[]>("GET", `/api/skills?${q({ scope })}`),
-  skill: (id: string) => request<SkillDetail>("GET", `/api/skills/${id}`),
+  skill: async (id: string) => {
+    const generation = requestGeneration()
+    const detail = await request<SkillDetail>("GET", `/api/skills/${id}`)
+    return { ...detail, skillMd: loaded(detail.skillMd, generation) }
+  },
   skillFile: (id: string, path: string) =>
     request<FileContent>("GET", `/api/skills/${id}/file?${q({ path })}`),
   saveSkillMd: (id: string, body: SaveRequest) =>
@@ -102,7 +117,10 @@ export const api = {
 
   instructions: (scope: ScopeKey) =>
     request<InstructionFile[]>("GET", `/api/instructions?${q({ scope })}`),
-  instruction: (id: string) => request<FileContent>("GET", `/api/instructions/${id}`),
+  instruction: async (id: string) => {
+    const generation = requestGeneration()
+    return loaded(await request<FileContent>("GET", `/api/instructions/${id}`), generation)
+  },
   saveInstruction: (id: string, body: SaveInstructionRequest) =>
     request<SaveResponse>("PUT", `/api/instructions/${id}`, body),
 
@@ -145,8 +163,10 @@ export function useAgents() {
   return useQuery({ queryKey: keys.agents, queryFn: api.agents, staleTime: Infinity })
 }
 
+// Skill lists and the update status refetch whenever a screen mounts (Back,
+// a layout switch): the update flags change when jobs and checks end.
 export function useSkills(scope: ScopeKey) {
-  return useQuery({ queryKey: keys.skills(scope), queryFn: () => api.skills(scope) })
+  return useQuery({ queryKey: keys.skills(scope), queryFn: () => api.skills(scope), refetchOnMount: "always" })
 }
 
 export function useSkill(id: string | null) {
@@ -182,7 +202,27 @@ export function useUpdates() {
   return useQuery({
     queryKey: keys.updates,
     queryFn: api.updates,
-    refetchInterval: (query) => (query.state.data?.checking ? 1500 : false),
+    refetchOnMount: "always",
+    refetchInterval: (query) => (query.state.data?.checking ? 3000 : false),
+  })
+}
+
+/**
+ * When a background check ends (UpdateStatus.checking goes from true to false),
+ * refetch the skills: their updateAvailable flags come from that check.
+ * Call once for the app's query client.
+ */
+export function refreshSkillsAfterChecks(client: QueryClient) {
+  let checking = false
+  return client.getQueryCache().subscribe((event) => {
+    if (event.type !== "updated" || event.query.queryKey[0] !== keys.updates[0]) return
+    const data = event.query.state.data as UpdateStatus | undefined
+    if (!data) return
+    if (checking && !data.checking) {
+      void client.invalidateQueries({ queryKey: ["skills"] })
+      void client.invalidateQueries({ queryKey: ["skill"] })
+    }
+    checking = data.checking
   })
 }
 
@@ -224,14 +264,18 @@ export function useUpdatePreview(id: string | null, enabled = true) {
   return useQuery(updatePreviewQuery(id, enabled))
 }
 
-/** HTTP status of a failed preview, and whether it rules the update out. */
+/**
+ * HTTP status of a failed preview, and whether it rules the update out.
+ * 400: skills update would skip the skill. 409: the update would fail upstream
+ * (also "unsafe_upstream"). 413: only the preview is too large; the update can run.
+ */
 export function previewFailure(error: unknown) {
   const status = error instanceof HttpError ? error.status : 0
   const message =
     error instanceof HttpError ? (error.body.detail ?? error.body.error) : errorMessage(error)
-  // 400: skills update would skip the skill. 409: the update would fail upstream.
   const blocking = status === 400 || status === 409
-  return { status, message, blocking }
+  const tooLarge = status === 413
+  return { status, message, blocking, tooLarge }
 }
 
 export function useSearch(text: string) {
@@ -244,13 +288,42 @@ export function useSearch(text: string) {
   })
 }
 
+/** The job list. Only useJobs polls; derived hooks read the same cache entry. */
+function jobsQuery<T = Job[]>(select?: (jobs: Job[]) => T) {
+  return queryOptions({ queryKey: keys.jobs, queryFn: api.jobs, select })
+}
+
 export function useJobs() {
   return useQuery({
-    queryKey: keys.jobs,
-    queryFn: api.jobs,
+    ...jobsQuery(),
     refetchInterval: (query) =>
       query.state.data?.some((job) => job.status === "running") ? 3000 : false,
   })
+}
+
+/** What the queued and running update jobs update (status "running" covers queued). */
+function runningUpdates(jobs: Job[]): UpdateTarget[] {
+  return jobs.filter((job) => job.status === "running" && job.update).map((job) => job.update!)
+}
+
+/**
+ * Whether a queued or running update job covers a skill, by scope and name.
+ * The server refuses a second overlapping update (409 update_in_progress);
+ * the UI disables it first.
+ */
+export function isBeingUpdated(running: UpdateTarget[], scope: ScopeKey, name: string) {
+  return running.some((target) => updateTargetsOverlap(target, { scope, names: [name] }))
+}
+
+/** The targets of queued and running update jobs. Same array until it changes. */
+export function useRunningUpdates(): UpdateTarget[] {
+  return useQuery(jobsQuery(runningUpdates)).data ?? NO_TARGETS
+}
+
+const NO_TARGETS: UpdateTarget[] = []
+
+export function useIsBeingUpdated(scope: ScopeKey, name: string) {
+  return useQuery(jobsQuery((jobs) => isBeingUpdated(runningUpdates(jobs), scope, name))).data ?? false
 }
 
 // ---------- Mutations ----------
@@ -280,8 +353,8 @@ export function useJobMutation<TArg>(fn: (arg: TArg) => Promise<JobRef>) {
   })
 }
 
-/** Refresh everything a finished job can change. */
-export function invalidateAfterJob(client: ReturnType<typeof useQueryClient>) {
+/** Refresh everything a finished job can change. Active queries refetch now, the rest on mount. */
+export function invalidateAfterJob(client: QueryClient) {
   for (const key of [["skills"], ["skill"], keys.updates, keys.scopes, keys.jobs]) {
     void client.invalidateQueries({ queryKey: key })
   }
@@ -292,7 +365,7 @@ export function invalidateAfterJob(client: ReturnType<typeof useQueryClient>) {
  * Reset, not invalidate: a stale diff must not show while the fresh one loads.
  * No ids = every preview.
  */
-export function resetUpdatePreviews(client: ReturnType<typeof useQueryClient>, ids?: string[]) {
+export function resetUpdatePreviews(client: QueryClient, ids?: string[]) {
   if (!ids) {
     void client.resetQueries({ queryKey: keys.updatePreviews })
     return

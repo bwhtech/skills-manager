@@ -1,6 +1,11 @@
 import { existsSync } from "node:fs"
 import { join } from "node:path"
-import type { ScopeKey, UpdateStatus } from "../shared/api.ts"
+import {
+  updateTargetsOverlap,
+  type ScopeKey,
+  type UpdateStatus,
+  type UpdateTarget,
+} from "../shared/api.ts"
 import { parseCheckOutput, type CheckFailure } from "./cli/parsers.ts"
 import type { SkillsCli } from "./cli/skills-cli.ts"
 import { config, projectLockName } from "./config.ts"
@@ -21,6 +26,8 @@ export class UpdateChecker {
     failed: [],
   }
   private again = false
+  /** updates that succeeded while a check ran: that check's results for them are stale */
+  private updatedDuringRun: UpdateTarget[] = []
 
   constructor(
     private readonly cli: SkillsCli,
@@ -41,6 +48,22 @@ export class UpdateChecker {
     )
   }
 
+  /**
+   * An update job succeeded: drop its skills from `available` at once
+   * (names empty = every skill in the scope), so the skill list stops
+   * flagging them before the next check ends. Failed entries stay. A check
+   * that runs now started before the update, so its result is pruned too;
+   * the caller starts a new check after this.
+   */
+  markUpdated(scope: ScopeKey, names: string[]): void {
+    const target: UpdateTarget = { scope, names }
+    this.status = {
+      ...this.status,
+      available: withoutUpdated(this.status.available, [target]),
+    }
+    if (this.status.checking) this.updatedDuringRun.push(target)
+  }
+
   /** Starts a check in the background and returns at once. */
   start(): UpdateStatus {
     if (this.status.checking) this.again = true
@@ -58,6 +81,7 @@ export class UpdateChecker {
   }
 
   private async runOnce(): Promise<void> {
+    this.updatedDuringRun = []
     const available: UpdateStatus["available"] = []
     const failed: NonNullable<UpdateStatus["failed"]> = []
     const errors: string[] = []
@@ -70,7 +94,7 @@ export class UpdateChecker {
     this.status = {
       checking: true,
       checkedAt: new Date().toISOString(),
-      available,
+      available: withoutUpdated(available, this.updatedDuringRun),
       error: errors.length ? errors.join("\n") : null,
       failed,
     }
@@ -96,6 +120,18 @@ export class UpdateChecker {
       return failedCheck(`${label}: ${(err as Error).message}`)
     }
   }
+}
+
+function withoutUpdated(
+  available: UpdateStatus["available"],
+  updated: UpdateTarget[]
+): UpdateStatus["available"] {
+  return available.filter(
+    (item) =>
+      !updated.some((target) =>
+        updateTargetsOverlap(target, { scope: item.scope, names: [item.name] })
+      )
+  )
 }
 
 export interface ScopeCheck {

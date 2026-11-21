@@ -25,7 +25,7 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
       <div className="flex min-h-7 items-center gap-2 max-md:flex-wrap max-md:gap-y-1.5">
         <h2 className="min-w-0 truncate text-base font-semibold max-md:hidden">{skill.name}</h2>
         <OriginBadge origin={skill.origin} />
-        {skill.updateAvailable && <UpdateBadge />}
+        {skill.updateAvailable && <UpdateBadge skill={skill} />}
         {readOnly && (
           <Badge variant="secondary" className="h-5 px-1.5 font-normal" title={readOnly}>
             <HugeiconsIcon icon={LockIcon} strokeWidth={2} data-icon="inline-start" />
