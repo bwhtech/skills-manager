@@ -9,6 +9,7 @@ import {
   editDraft,
   failSave,
   finishSave,
+  discardDraft,
   getDraft,
   isDraftDirty,
   openDraft,
@@ -80,14 +81,13 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   const [mode, setMode] = useViewMode()
   const isDesktop = useIsDesktop()
   const dirty = isDraftDirty(doc)
+  // A save found that the path leads to another file now: saving stays off (see drafts.ts).
+  const relocated = doc.relocated ?? null
   const markdown = isMarkdownPath(path)
   const viewMode = !markdown ? "edit" : mode === "split" && !isDesktop ? "edit" : mode
   const preview = useDeferredValue(draft)
   const { openFrom } = props
   const root = useRef<HTMLDivElement>(null)
-  // A save found that the path leads to another file now (409 moved / now_linked). Saving
-  // stops in this editor: no forced save may write the draft there. Reopening remounts it.
-  const [relocated, setRelocated] = useState<{ target?: string } | null>(null)
   const onOpenLink = useCallback(
     (link: LinkTarget) => {
       if (openFrom) openLink(link, openFrom)
@@ -127,10 +127,9 @@ export default function DocumentEditor(props: DocumentEditorProps) {
       toast.success(`Saved ${title}`)
     } catch (error) {
       // Only a content conflict opens the dialog (and its Overwrite).
-      failSave(draftKey, start, { conflict: isConflict(error) })
       const moved = relocation(error)
-      if (moved) setRelocated(moved)
-      else if (!isConflict(error)) toast.error(`Could not save ${title}`, { description: errorMessage(error) })
+      failSave(draftKey, start, { conflict: isConflict(error), relocated: moved })
+      if (!moved && !isConflict(error)) toast.error(`Could not save ${title}`, { description: errorMessage(error) })
     }
   }
 
@@ -169,7 +168,15 @@ export default function DocumentEditor(props: DocumentEditorProps) {
         saving={saving}
         onSave={() => void save()}
       />
-      {relocated && <RelocatedBanner target={relocated.target} />}
+      {relocated && (
+        <RelocatedBanner
+          target={relocated.target}
+          onDiscard={() => {
+            discardDraft(draftKey)
+            void reload()
+          }}
+        />
+      )}
       {warning && <WarningLine text={warning} />}
       <ValidationBanner problems={problems} />
       <div

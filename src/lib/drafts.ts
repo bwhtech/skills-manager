@@ -44,6 +44,12 @@ export interface DraftState {
   saving: SaveStart | null
   /** the last save found the file changed on disk, or the draft is stale */
   conflict: boolean
+  /**
+   * A save found that the path now leads to another file (409 moved / now_linked). The
+   * draft stays, saving and Overwrite stay off, and refetches never touch it, until the
+   * user discards it. Kept here, not in the editor, so a remounted editor keeps it too.
+   */
+  relocated: { target?: string } | null
 }
 
 export interface SaveStart {
@@ -146,12 +152,13 @@ export function openDraft(key: string, file: Version): DraftState {
       saving: null,
       conflict: false,
       lastSave: null,
+      relocated: null,
       mounts: 0,
     }
     entries.set(key, fresh)
     return fresh
   }
-  if (entry.conflict) return entry
+  if (entry.conflict || entry.relocated) return entry
   const verdict = judge(entry, file)
   if (verdict === "keep") return entry
   // Nothing to lose: start over from the file as loaded. Or keep the edits and ask.
@@ -200,6 +207,9 @@ export function rebaseDraft(key: string, file: Version, options: { keepDraft?: b
   const entry = entries.get(key)
   if (!entry) return
   if (options.keepDraft) {
+    // A relocated draft waits for the user: a refetch of the new target neither replaces
+    // it nor turns it into a content conflict (whose Overwrite would write it there).
+    if (entry.relocated) return
     const verdict = judge(entry, file)
     if (verdict === "keep") return
     if (verdict === "conflict") {
@@ -236,14 +246,21 @@ export function finishSave(key: string, start: SaveStart, saved: { hash: string;
   })
 }
 
-export function failSave(key: string, start: SaveStart, options: { conflict: boolean }) {
+export function failSave(
+  key: string,
+  start: SaveStart,
+  options: { conflict: boolean; relocated?: { target?: string } | null }
+) {
   const entry = entries.get(key)
   if (!entry || entry.saving !== start) return
-  update(key, { saving: null, conflict: options.conflict || entry.conflict })
+  if (options.relocated) update(key, { saving: null, conflict: false, relocated: options.relocated })
+  else update(key, { saving: null, conflict: options.conflict || entry.conflict })
 }
 
 export function setDraftConflict(key: string, conflict: boolean) {
-  if (entries.get(key)?.conflict !== conflict) update(key, { conflict })
+  const entry = entries.get(key)
+  if (!entry || (conflict && entry.relocated)) return
+  if (entry.conflict !== conflict) update(key, { conflict })
 }
 
 /**
@@ -266,8 +283,8 @@ function discardEntry(key: string): boolean {
   const entry = entries.get(key)
   if (!entry) return false
   const clean = entry.saving ? entry.saving.content : entry.base.content
-  if (entry.content === clean && !entry.conflict) return false
-  const next = { ...entry, content: clean, conflict: false }
+  if (entry.content === clean && !entry.conflict && !entry.relocated) return false
+  const next = { ...entry, content: clean, conflict: false, relocated: null }
   if (next.mounts <= 0 && !next.saving) entries.delete(key)
   else entries.set(key, next)
   return true

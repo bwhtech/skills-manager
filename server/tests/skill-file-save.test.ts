@@ -196,6 +196,14 @@ describe("PUT /api/skills/:id/file", () => {
     expect((await save(root, "blob.md", { content: "x", force: true })).status).toBe(403)
   })
 
+  test("a .md with a NUL past the first 8 KB is still refused (the whole file is scanned)", async () => {
+    const root = await skill("late-nul", "manual")
+    const text = Buffer.from("# notes\n" + "a".repeat(9000))
+    text[9000] = 0
+    await writeFile(join(root, "late.md"), text)
+    expect((await save(root, "late.md", { content: "x", force: true })).status).toBe(403)
+  })
+
   test("needs the mutation header and a same-origin Origin", async () => {
     const root = await skill("guarded", "manual", { "references/x.md": "keep\n" })
     expect((await saveOver(root, "references/x.md", "x\n", {})).status).toBe(403)

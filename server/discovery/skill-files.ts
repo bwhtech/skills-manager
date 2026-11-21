@@ -160,7 +160,7 @@ export async function editableSkillFile(root: string, rel: string): Promise<stri
   const info = await stat(real)
   if (!info.isFile()) throw notFound("Not a file")
   if (info.size > MAX_TEXT_BYTES) throw readOnly("Files larger than 1 MB cannot be edited")
-  if (await hasNulByte(real, 8192)) throw readOnly("Binary files cannot be edited")
+  if (await hasNulByte(real, MAX_TEXT_BYTES)) throw readOnly("Binary files cannot be edited")
   const listed = (await listSkillFiles(root)).some((entry) => entry.path === rel && entry.isText)
   if (!listed) throw readOnly("Only files listed in the skill folder can be edited")
   return real

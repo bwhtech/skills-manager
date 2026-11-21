@@ -136,7 +136,7 @@ export class PathOpener {
     const info = await stat(real)
     if (!info.isFile()) throw notFound(`Not a file: ${path}`)
     if (info.size > MAX_TEXT_BYTES) throw new HttpError(413, "too_large", "File is larger than 1 MB")
-    if (await hasNulByte(real, 8192)) throw new HttpError(415, "binary", "Not shown: a binary file")
+    if (await hasNulByte(real, MAX_TEXT_BYTES)) throw new HttpError(415, "binary", "Not shown: a binary file")
     return real
   }
 

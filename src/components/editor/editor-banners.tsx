@@ -28,18 +28,25 @@ export function WarningLine({ text }: { text: string }) {
 }
 
 /** A save was refused because the file now leads elsewhere: the draft stays, saving stops. */
-export function RelocatedBanner({ target }: { target?: string }) {
+export function RelocatedBanner({ target, onDiscard }: { target?: string; onDiscard: () => void }) {
   return (
     <div
       role="alert"
       className="flex items-start gap-2 border-b bg-destructive/8 px-4 py-2 text-xs text-destructive dark:bg-destructive/15"
     >
       <HugeiconsIcon icon={Alert02Icon} strokeWidth={2} className="mt-px size-3.5 shrink-0" />
-      <span className="min-w-0 break-words">{relocatedNotice(target)}</span>
+      <span className="min-w-0 flex-1 break-words">{relocatedNotice(target)}</span>
+      <button
+        type="button"
+        onClick={onDiscard}
+        className="pressable shrink-0 rounded-md px-1.5 font-medium underline underline-offset-2 pointer-coarse:min-h-11"
+      >
+        Discard edits and reload
+      </button>
     </div>
   )
 }
 
 export function relocatedNotice(target?: string) {
-  return `This file now points somewhere else${target ? ` (${target})` : ""}. Your edits are kept; reopen it to save.`
+  return `This file now points somewhere else${target ? ` (${target})` : ""}. Your edits are kept and won't be saved there; copy what you need, then discard them to reload the file.`
 }

@@ -290,3 +290,27 @@ describe("rollback on disk after a save (A -> save B -> restore A)", () => {
     expect(openDraft(KEY, fetched(v2)).conflict).toBe(false)
   })
 })
+
+describe("relocated drafts (a save found the path now leads elsewhere)", () => {
+  beforeEach(() => resetDrafts())
+
+  test("survive a remount, never become a content conflict, and clear on discard", () => {
+    const first = mount(v1)
+    editDraft(KEY, "mine\n")
+    const start = beginSave(KEY)!
+    // The editor is replaced (layout switch) while the save runs.
+    first.release()
+    mount(v1)
+    failSave(KEY, start, { conflict: false, relocated: { target: "/elsewhere.md" } })
+    expect(getDraft(KEY)?.relocated).toEqual({ target: "/elsewhere.md" })
+    expect(getDraft(KEY)?.content).toBe("mine\n")
+    // A refetch of the new target neither replaces the draft nor offers Overwrite.
+    rebaseDraft(KEY, v2, { keepDraft: true })
+    expect(getDraft(KEY)?.content).toBe("mine\n")
+    expect(getDraft(KEY)?.conflict).toBe(false)
+    // Opening it again keeps the state too.
+    expect(openDraft(KEY, v2).relocated).toEqual({ target: "/elsewhere.md" })
+    discardDraft(KEY)
+    expect(getDraft(KEY)?.relocated ?? null).toBeNull()
+  })
+})
