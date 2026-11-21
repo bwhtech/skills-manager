@@ -95,7 +95,10 @@ export interface SkillSummary {
   /** every place this folder appears (symlinks included), absolute */
   locations: string[]
   agents: string[] // AgentInfo ids that see this skill
+  /** owning scope: update and remove act here */
   scope: ScopeKey
+  /** every scope the skill appears in (a project can link a user skill); includes scope */
+  scopes: ScopeKey[]
   origin: SkillOrigin
   editable: boolean // false for plugin, synced, system
   source?: SkillSource // origin === "npx"
@@ -105,6 +108,7 @@ export interface SkillSummary {
 
 // GET /api/skills?scope=<ScopeKey>  -> SkillSummary[]
 //   scope omitted = all scopes. Sorted by name.
+//   With scope: every skill whose `scopes` contains it (not only owned ones).
 
 export interface SkillFileEntry {
   path: string // relative to realPath, posix separators
@@ -184,7 +188,13 @@ export interface UpdateStatus {
   checkedAt: string | null // ISO
   /** skill names with an update, per scope */
   available: { scope: ScopeKey; name: string }[]
+  /** summary of failed checks, e.g. "user scope: 2 sources could not be checked" */
   error: string | null
+  /**
+   * what could not be checked, per scope. `name` is what the CLI names:
+   * a skill source (owner/repo, URL) or a skill name.
+   */
+  failed?: { scope: ScopeKey; name: string; reason: string }[]
 }
 
 // GET  /api/updates            -> UpdateStatus  (cached; the server starts a check on boot)

@@ -1,5 +1,4 @@
 import { Hono } from "hono"
-import { join } from "node:path"
 import type {
   JobRef,
   SaveRequest,
@@ -8,14 +7,14 @@ import type {
   SkillSummary,
 } from "../../shared/api.ts"
 import type { IndexedSkill } from "../discovery/skill-index.ts"
-import { listSkillFiles, readSkillFile } from "../discovery/skill-files.ts"
-import { forbidden, notFound, readJson } from "../lib/errors.ts"
 import {
-  readTextFile,
-  realpathOrNull,
-  saveTextFile,
-  isInside,
-} from "../lib/files.ts"
+  containedSkillMd,
+  listSkillFiles,
+  readSkillFile,
+  readSkillMd,
+} from "../discovery/skill-files.ts"
+import { forbidden, notFound, readJson } from "../lib/errors.ts"
+import { saveTextFile } from "../lib/files.ts"
 import { decodePathId, requireScope } from "../lib/validate.ts"
 import type { Services } from "../services.ts"
 
@@ -39,7 +38,9 @@ export function skillRoutes(svc: Services): Hono {
         : requireScope(raw, (p) => svc.projects.has(p))
     const skills = await svc.skills.all()
     return c.json(
-      skills.filter((s) => scope === null || s.scope === scope).map(summary)
+      skills
+        .filter((s) => scope === null || s.scopes.includes(scope))
+        .map(summary)
     )
   })
 
@@ -47,7 +48,7 @@ export function skillRoutes(svc: Services): Hono {
     const skill = await lookup(c.req.param("id"))
     const [files, skillMd] = await Promise.all([
       listSkillFiles(skill.realPath),
-      readTextFile(join(skill.realPath, "SKILL.md")),
+      readSkillMd(skill.realPath),
     ])
     const body: SkillDetail = { ...summary(skill), files, skillMd }
     return c.json(body)
@@ -61,11 +62,10 @@ export function skillRoutes(svc: Services): Hono {
   app.put("/skills/:id/skill-md", async (c) => {
     const skill = await lookup(c.req.param("id"))
     if (!skill.editable) throw forbidden(`${skill.origin} skills are read-only`)
-    const target = await realpathOrNull(join(skill.realPath, "SKILL.md"))
-    if (!target) throw notFound("SKILL.md is missing")
     // A SKILL.md that links out of the folder is not ours to write.
-    if (!isInside(skill.realPath, target))
-      throw forbidden("SKILL.md links outside the skill folder")
+    const target = await containedSkillMd(skill.realPath)
+    if (!target)
+      throw forbidden("SKILL.md is missing or links outside the skill folder")
     const mtimeMs = await saveTextFile(target, await readJson<SaveRequest>(c))
     svc.skills.invalidate()
     const body: SaveResponse = { mtimeMs }
@@ -83,7 +83,8 @@ export function skillRoutes(svc: Services): Hono {
 }
 
 function toSummary(skill: IndexedSkill, svc: Services): SkillSummary {
-  const { cliName, folderName, ...rest } = skill
+  const { cliName, folderName, placements, ...rest } = skill
+  void placements // internal: where to remove from
   const updateAvailable =
     skill.origin === "npx" &&
     svc.updates.has(skill.scope, [cliName, folderName, skill.name])

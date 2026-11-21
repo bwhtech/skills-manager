@@ -1,10 +1,10 @@
-import { existsSync } from "node:fs"
 import { readdir, readFile, realpath } from "node:fs/promises"
 import { join } from "node:path"
 import type { ScopeKey } from "../../shared/api.ts"
 import { config } from "../config.ts"
-import { isDirectory } from "../lib/files.ts"
+import { isDirectory, pathExists } from "../lib/files.ts"
 import type { AgentRegistry } from "./agents.ts"
+import { containedSkillMd } from "./skill-files.ts"
 
 export type LocationKind = "agent" | "plugin" | "synced" | "system"
 
@@ -12,6 +12,8 @@ export type LocationKind = "agent" | "plugin" | "synced" | "system"
 export interface SkillLocation {
   path: string
   realPath: string
+  /** the skills dir the location was found in (path is a direct child) */
+  root: string
   scope: ScopeKey
   /** agent ids that see the skill through this location */
   agents: string[]
@@ -109,6 +111,7 @@ export class SkillLocator {
     const folders = await listSkillFolders(dir)
     return folders.map((f) => ({
       ...f,
+      root: dir,
       scope,
       agents,
       kind,
@@ -117,7 +120,11 @@ export class SkillLocator {
   }
 }
 
-/** Child folders (or symlinks to folders) that hold a SKILL.md. Hidden ones are skipped. */
+/**
+ * Child folders (or symlinks to folders) that hold a SKILL.md. Hidden ones
+ * are skipped, and so are folders whose SKILL.md links out of the folder:
+ * the server never reads a file outside a skill folder as its SKILL.md.
+ */
 export async function listSkillFolders(
   dir: string
 ): Promise<{ path: string; realPath: string }[]> {
@@ -127,10 +134,12 @@ export async function listSkillFolders(
       if (entry.name.startsWith(".")) return null
       if (!entry.isDirectory() && !entry.isSymbolicLink()) return null
       const path = join(dir, entry.name)
-      if (!existsSync(join(path, "SKILL.md"))) return null
+      if (!(await pathExists(join(path, "SKILL.md")))) return null
       if (entry.isSymbolicLink() && !(await isDirectory(path))) return null
       const real = await realpath(path).catch(() => null)
-      return real ? { path, realPath: real } : null
+      if (!real) return null
+      if (!(await containedSkillMd(real))) return null
+      return { path, realPath: real }
     })
   )
   return out.filter((x) => x !== null)

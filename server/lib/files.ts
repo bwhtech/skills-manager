@@ -28,6 +28,8 @@ export async function readTextFile(path: string): Promise<FileContent> {
 /**
  * Save with an optimistic lock on mtime. Writes atomically: a temp file in
  * the same directory, then rename. Pass the real target, not a symlink.
+ * The mtime check and the write run under a per-path lock, so two saves
+ * with the same baseMtimeMs cannot both pass the check.
  */
 export async function saveTextFile(
   target: string,
@@ -37,17 +39,39 @@ export async function saveTextFile(
     throw badRequest("content must be a string")
   if (Buffer.byteLength(req.content) > MAX_TEXT_BYTES)
     throw new HttpError(413, "too_large", "Content is larger than 1 MB")
-  const current = await stat(target)
-  if (!req.force) {
-    if (typeof req.baseMtimeMs !== "number")
-      throw badRequest("baseMtimeMs is required unless force is set")
-    if (Math.abs(current.mtimeMs - req.baseMtimeMs) > MTIME_TOLERANCE_MS) {
+  if (!req.force && typeof req.baseMtimeMs !== "number")
+    throw badRequest("baseMtimeMs is required unless force is set")
+  const content = req.content
+  return withPathLock(resolve(target), async () => {
+    const current = await stat(target)
+    if (
+      !req.force &&
+      Math.abs(current.mtimeMs - req.baseMtimeMs!) > MTIME_TOLERANCE_MS
+    ) {
       throw new HttpError(409, "conflict", "The file changed on disk", {
         currentMtimeMs: current.mtimeMs,
       })
     }
+    return atomicWrite(target, content, current.mode & 0o7777)
+  })
+}
+
+const pathLocks = new Map<string, Promise<unknown>>()
+
+/** Runs fn after every earlier fn for the same path has settled. */
+export async function withPathLock<T>(
+  path: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const previous = pathLocks.get(path) ?? Promise.resolve()
+  const run = previous.then(fn, fn)
+  const tail = run.catch(() => {})
+  pathLocks.set(path, tail)
+  try {
+    return await run
+  } finally {
+    if (pathLocks.get(path) === tail) pathLocks.delete(path)
   }
-  return atomicWrite(target, req.content, current.mode & 0o7777)
 }
 
 export async function atomicWrite(

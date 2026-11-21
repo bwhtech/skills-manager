@@ -37,7 +37,8 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
   const save = async (content: string, { baseMtimeMs, force }: SaveOptions) => {
     const result = await api.saveSkillMd(skill.id, { content, baseMtimeMs, force })
     void client.invalidateQueries({ queryKey: keys.skill(skill.id) })
-    void client.invalidateQueries({ queryKey: keys.skills(skill.scope) })
+    // The skill can be listed in several scopes; refresh every list.
+    void client.invalidateQueries({ queryKey: ["skills"] })
     return result
   }
 

@@ -11,6 +11,7 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view"
+import { cn } from "@/lib/utils"
 import { editorTheme } from "./editor-theme"
 import { highlighting } from "./highlight"
 import { languageForPath } from "./languages"
@@ -22,9 +23,17 @@ interface CodeEditorProps {
   /** file path, used to pick the language */
   path: string
   ariaLabel: string
+  className?: string
 }
 
-export function CodeEditor({ value, onChange, readOnly = false, path, ariaLabel }: CodeEditorProps) {
+export function CodeEditor({
+  value,
+  onChange,
+  readOnly = false,
+  path,
+  ariaLabel,
+  className,
+}: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
   const compartments = useRef({ language: new Compartment(), readOnly: new Compartment() })
@@ -101,7 +110,7 @@ export function CodeEditor({ value, onChange, readOnly = false, path, ariaLabel 
     }
   }, [value])
 
-  return <div ref={host} className="h-full min-h-0 overflow-hidden" />
+  return <div ref={host} className={cn("h-full min-h-0 overflow-hidden", className)} />
 }
 
 // Read-only keeps the content focusable, so text can still be selected and searched.

@@ -44,7 +44,7 @@ async function scopesResponse(svc: Services): Promise<ScopesResponse> {
       name: p.path.split("/").pop() ?? p.path,
       pinned: p.pinned,
       discovered: p.discovered,
-      skillCount: skills.filter((s) => s.scope === p.path).length,
+      skillCount: skills.filter((s) => s.scopes.includes(p.path)).length,
       instructionFileCount: await svc.instructions.countExisting(p.path),
     }))
   )

@@ -1,9 +1,14 @@
-import { lstat, rm, unlink } from "node:fs/promises"
+import { lstat, realpath, rm, unlink } from "node:fs/promises"
+import { dirname, join, relative, resolve } from "node:path"
 import type { InstallRequest, Job, UpdateRunRequest } from "../shared/api.ts"
 import type { SkillsCli } from "./cli/skills-cli.ts"
 import { config } from "./config.ts"
-import type { IndexedSkill } from "./discovery/skill-index.ts"
+import type {
+  IndexedSkill,
+  SkillPlacement,
+} from "./discovery/skill-index.ts"
 import { forbidden } from "./lib/errors.ts"
+import { isInside, realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
 
 /** Builds and queues the jobs that change installed skills. */
@@ -69,7 +74,7 @@ export class SkillActions {
       title: `Remove ${skill.name} (${scopeLabel(skill.scope)})`,
       command: `delete ${skill.realPath}`,
       cwd: skill.realPath,
-      run: (log) => removeManual(skill, log),
+      run: (log) => removeManualSkill(skill, log),
     })
   }
 
@@ -100,30 +105,81 @@ export class SkillActions {
 }
 
 /**
- * Removes a hand-made skill. Symlinks to it go first. The folder is deleted
- * only if it sits in a skills dir itself; a folder that is only linked in
- * (e.g. a checkout elsewhere) is kept.
+ * Removes a hand-made skill. A folder is deleted recursively only when it
+ * really lives in an approved skills dir: the location is a plain directory
+ * (not a link), and its skills dir resolves to the same path without going
+ * through a symlink (neither the dir itself nor a parent between the scope
+ * root and the dir). A location that is a symlink is unlinked, keeping its
+ * target, but only inside such an approved dir. Anything reached through an
+ * alias into another directory is left alone.
  */
-async function removeManual(skill: IndexedSkill, log: JobLog): Promise<number> {
-  let ownsFolder = false
-  for (const loc of skill.locations) {
-    const info = await lstat(loc).catch(() => null)
-    if (info?.isDirectory()) ownsFolder = true
-    if (!info?.isSymbolicLink()) continue
-    await unlink(loc)
-    log(`Removed link ${loc}`)
+export async function removeManualSkill(
+  skill: Pick<IndexedSkill, "realPath" | "placements">,
+  log: JobLog,
+  home = config.home
+): Promise<number> {
+  const approved = new Map<string, boolean>()
+  const isApproved = async (p: SkillPlacement) => {
+    if (!approved.has(p.root))
+      approved.set(p.root, await isApprovedSkillsDir(p, home))
+    return approved.get(p.root)!
   }
-  if (!ownsFolder) {
-    log(`Kept ${skill.realPath}: it lives outside the skills folders.`)
-    return 0
+  let removed = false
+  let owner: string | null = null
+  for (const placement of skill.placements) {
+    const info = await lstat(placement.path).catch(() => null)
+    if (!info) continue
+    if (!(await isApproved(placement))) {
+      log(`Kept ${placement.path}: its skills dir links outside the scope.`)
+      continue
+    }
+    if (info.isSymbolicLink()) {
+      await unlink(placement.path)
+      removed = true
+      log(`Removed link ${placement.path}`)
+      continue
+    }
+    const real = await realpath(placement.path).catch(() => null)
+    if (info.isDirectory() && real === skill.realPath) owner = placement.path
   }
-  if (skill.realPath === config.home || skill.realPath.split("/").length < 4) {
-    log(`Refused to delete ${skill.realPath}`)
+  if (owner === null) {
+    if (removed) log(`Kept ${skill.realPath}: it lives outside the skills dirs.`)
+    else log(`Nothing removed: ${skill.realPath} is not in a skills dir.`)
+    return removed ? 0 : 1
+  }
+  if (isUnsafeToDelete(owner, home)) {
+    log(`Refused to delete ${owner}`)
     return 1
   }
-  await rm(skill.realPath, { recursive: true })
-  log(`Deleted ${skill.realPath}`)
+  await rm(owner, { recursive: true })
+  log(`Deleted ${owner}`)
   return 0
+}
+
+/**
+ * The skills dir resolves to the path discovery expects: no component from
+ * the scope root (home or the project) down to the dir is a symlink. The scope
+ * root itself may sit behind a link; it is resolved once and trusted.
+ */
+async function isApprovedSkillsDir(
+  placement: SkillPlacement,
+  home: string
+): Promise<boolean> {
+  const root = resolve(placement.root)
+  if (dirname(resolve(placement.path)) !== root) return false
+  const scopeRoot = placement.scope === "user" ? home : placement.scope
+  const base = isInside(scopeRoot, root) ? scopeRoot : dirname(root)
+  const [realBase, realRoot] = await Promise.all([
+    realpathOrNull(base),
+    realpathOrNull(root),
+  ])
+  if (!realBase || !realRoot) return false
+  return realRoot === join(realBase, relative(base, root))
+}
+
+function isUnsafeToDelete(path: string, home: string): boolean {
+  const p = resolve(path)
+  return p === home || isInside(p, home) || p.split("/").length < 4
 }
 
 function scopeLabel(scope: string): string {

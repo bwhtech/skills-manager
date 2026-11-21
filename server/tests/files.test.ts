@@ -6,6 +6,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -42,6 +43,24 @@ describe("saveTextFile", () => {
     expect(err.status).toBe(409)
     expect(err.extra.currentMtimeMs).toBe((await stat(file)).mtimeMs)
     expect(await readFile(file, "utf8")).toBe("a")
+  })
+
+  test("concurrent saves with the same base: one wins, one conflicts", async () => {
+    const file = join(dir, "race.md")
+    await writeFile(file, "a")
+    // An old mtime, so the first write surely moves it past the tolerance.
+    await utimes(file, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
+    const base = (await stat(file)).mtimeMs
+    const results = await Promise.allSettled([
+      saveTextFile(file, { content: "one", baseMtimeMs: base }),
+      saveTextFile(file, { content: "two", baseMtimeMs: base }),
+    ])
+    const ok = results.filter((r) => r.status === "fulfilled")
+    const failed = results.filter((r) => r.status === "rejected")
+    expect(ok).toHaveLength(1)
+    expect(failed).toHaveLength(1)
+    expect((failed[0] as PromiseRejectedResult).reason.status).toBe(409)
+    expect(await readFile(file, "utf8")).toBe("one")
   })
 
   test("force overwrites without a base", async () => {

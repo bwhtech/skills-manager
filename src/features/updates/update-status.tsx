@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, errorMessage, useCheckUpdates, useJobMutation, useUpdates } from "@/lib/api"
-import { plural, timeAgo } from "@/lib/format"
+import { basename, plural, timeAgo } from "@/lib/format"
 import { showJob } from "@/features/jobs/job-store"
 
 export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName: string }) {
@@ -18,6 +18,7 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
   const checking = !!status?.checking || check.isPending
   const total = status?.available.length ?? 0
   const inScope = status?.available.filter((item) => item.scope === scope) ?? []
+  const failed = status?.failed ?? []
 
   const refresh = () =>
     check.mutate(undefined, {
@@ -34,7 +35,7 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
     )
 
   const summary = status?.error
-    ? `Last check failed: ${status.error}`
+    ? `Some checks failed: ${status.error}`
     : status?.checkedAt
       ? `Checked ${timeAgo(status.checkedAt)}`
       : "Not checked yet"
@@ -53,6 +54,7 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
             }
           >
             {status.error && total === 0 ? "Check failed" : plural(total, "update")}
+            {status.error && total > 0 && " · some failed"}
           </TooltipTrigger>
           <TooltipContent className="max-w-sm">
             <div className="flex flex-col gap-1">
@@ -62,6 +64,17 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
                   {status.available.slice(0, 12).map((item) => item.name).join(", ")}
                   {total > 12 ? ` and ${total - 12} more` : ""}
                 </span>
+              )}
+              {failed.length > 0 && (
+                <ul className="flex flex-col gap-0.5 opacity-80">
+                  {failed.slice(0, 8).map((item, i) => (
+                    <li key={i} className="break-all">
+                      ✗ {item.name}: {item.reason}
+                      {item.scope !== "user" && ` (${basename(item.scope)})`}
+                    </li>
+                  ))}
+                  {failed.length > 8 && <li>and {failed.length - 8} more</li>}
+                </ul>
               )}
             </div>
           </TooltipContent>

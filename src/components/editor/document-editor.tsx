@@ -137,15 +137,15 @@ export default function DocumentEditor(props: DocumentEditorProps) {
           viewMode === "split" ? "grid-cols-2 divide-x" : "grid-cols-1"
         )}
       >
-        {viewMode !== "preview" && (
-          <CodeEditor
-            value={draft}
-            onChange={setDraft}
-            readOnly={!!readOnlyReason}
-            path={path}
-            ariaLabel={`${title} editor`}
-          />
-        )}
+        {/* Hidden, not unmounted, in preview: the view keeps its undo history. */}
+        <CodeEditor
+          value={draft}
+          onChange={setDraft}
+          readOnly={!!readOnlyReason}
+          path={path}
+          ariaLabel={`${title} editor`}
+          className={viewMode === "preview" ? "hidden" : undefined}
+        />
         {viewMode !== "edit" && (
           <div className="min-h-0 overflow-auto px-6 py-4" tabIndex={0} aria-label={`${title} preview`}>
             <MarkdownPreview text={preview} />

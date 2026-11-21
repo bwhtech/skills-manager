@@ -50,7 +50,7 @@ export function RemoveSkillButton({ skill }: { skill: SkillSummary }) {
           <AlertDialogDescription>
             {skill.origin === "npx"
               ? `Runs "skills remove" for ${skill.name}. Every agent in this scope loses the skill.`
-              : `Deletes the folder ${skill.realPath}. This cannot be undone.`}
+              : `Deletes the folder ${skill.realPath} if it lives in a skills folder, and removes links to it there. A folder that is only linked in from elsewhere is kept. This cannot be undone.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

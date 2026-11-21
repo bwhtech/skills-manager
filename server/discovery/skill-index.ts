@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { basename } from "node:path"
 import type {
   ScopeKey,
   SkillOrigin,
@@ -12,6 +12,7 @@ import { config } from "../config.ts"
 import { parseFrontmatter, stringField } from "../lib/frontmatter.ts"
 import type { AgentRegistry } from "./agents.ts"
 import { cliListing, type CliListed } from "./cli-listing.ts"
+import { containedSkillMd } from "./skill-files.ts"
 import {
   readGlobalLock,
   readProjectLock,
@@ -25,10 +26,18 @@ import {
   type SkillLocation,
 } from "./skill-locations.ts"
 
+/** One place a skill folder appears, with the skills dir it was found in. */
+export interface SkillPlacement {
+  path: string
+  root: string
+  scope: ScopeKey
+}
+
 /** A discovered skill. `cliName` is the name the skills CLI knows it by. */
 export interface IndexedSkill extends Omit<SkillSummary, "updateAvailable"> {
   cliName: string
   folderName: string
+  placements: SkillPlacement[]
 }
 
 interface ScopeContext {
@@ -151,10 +160,12 @@ export class SkillIndex {
       locations: [...new Set(locs.map((l) => l.path))].sort(),
       agents: [...agents].sort(),
       scope: first.scope,
+      scopes: [...new Set(locs.map((l) => l.scope))],
       origin,
       editable: origin === "npx" || origin === "manual",
       cliName: lockName ?? listed?.name ?? name,
       folderName,
+      placements: locs.map(({ path, root, scope }) => ({ path, root, scope })),
     }
     if (origin === "npx") {
       const source = lockName
@@ -190,8 +201,11 @@ function groupByRealPath(
   return groups
 }
 
-// A project can link to a user skill; the first scope (user) wins, locations merge.
-function dedupe(skills: IndexedSkill[]): IndexedSkill[] {
+/**
+ * A project can link to a user skill. The first scope (user) stays the
+ * owning `scope`; locations, agents, placements and scope membership merge.
+ */
+export function dedupe(skills: IndexedSkill[]): IndexedSkill[] {
   const byPath = new Map<string, IndexedSkill>()
   for (const skill of skills) {
     const existing = byPath.get(skill.realPath)
@@ -203,6 +217,8 @@ function dedupe(skills: IndexedSkill[]): IndexedSkill[] {
       ...new Set([...existing.locations, ...skill.locations]),
     ].sort()
     existing.agents = [...new Set([...existing.agents, ...skill.agents])].sort()
+    existing.scopes = [...new Set([...existing.scopes, ...skill.scopes])]
+    existing.placements = [...existing.placements, ...skill.placements]
   }
   return [...byPath.values()]
 }
@@ -211,7 +227,9 @@ async function readMeta(
   realPath: string
 ): Promise<{ name: string; description: string }> {
   try {
-    const text = await readFile(join(realPath, "SKILL.md"), "utf8")
+    const skillMd = await containedSkillMd(realPath)
+    if (!skillMd) return { name: "", description: "" }
+    const text = await readFile(skillMd, "utf8")
     const { data } = parseFrontmatter(text)
     return {
       name: stringField(data, "name"),

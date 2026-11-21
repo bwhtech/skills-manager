@@ -95,6 +95,24 @@ export async function listSkillFiles(root: string): Promise<SkillFileEntry[]> {
   return out.sort((a, b) => a.path.localeCompare(b.path))
 }
 
+/**
+ * Real path of the skill's SKILL.md, or null when it is missing, not a file,
+ * or a link that leads out of the skill folder. `root` must be a real path.
+ */
+export async function containedSkillMd(root: string): Promise<string | null> {
+  const real = await realpath(join(root, "SKILL.md")).catch(() => null)
+  if (!real || real === root || !isInside(root, real)) return null
+  const info = await stat(real).catch(() => null)
+  return info?.isFile() ? real : null
+}
+
+/** SKILL.md of a skill folder, read only if it stays inside the folder. */
+export async function readSkillMd(root: string): Promise<FileContent> {
+  const real = await containedSkillMd(root)
+  if (!real) throw notFound("SKILL.md is missing or links outside the skill folder")
+  return readTextFile(real)
+}
+
 /** A text file inside the skill folder. The real path must stay inside it. */
 export async function readSkillFile(
   root: string,
