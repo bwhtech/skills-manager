@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "./file-changes"
 import { OVERWRITE_DETAIL } from "./copy"
-import { AmbiguousUpstreamNote, confirmLabel, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
+import { AmbiguousUpstreamNote, confirmLabel, copies, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
 import {
   OverwriteWarning,
   PreviewSummary,
@@ -32,7 +32,7 @@ import {
   sourceHref,
 } from "./preview-parts"
 import { PreviewError, PreviewLoading, UpToDateNote } from "./preview-states"
-import { UpdateDialogBody, UpdateDialogFooter, UpdateDialogHeader, UpdateDialogShell } from "./update-dialog-shell"
+import { CONFIRM_WRAP, UpdateDialogBody, UpdateDialogFooter, UpdateDialogHeader, UpdateDialogShell } from "./update-dialog-shell"
 
 interface UpdateSkillDialogProps {
   skill: SkillSummary
@@ -115,17 +115,24 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
             {running
               ? "An update of this skill is running. Wait for it to finish."
               : remove.length
-                ? `Runs skills remove for ${remove.length > 2 ? plural(remove.length, "skill") : remove.join(", ")}.`
+                ? `${choices.copyCount ? `Deletes ${copies(choices.copyCount)}, then runs` : "Runs"} skills remove for ${remove.length > 2 ? plural(remove.length, "skill") : remove.join(", ")}.`
                 : choices.dropped.some((d) => d.item.name === cliName)
                   ? "Not offered for removal: see the reason above."
-                  : "Nothing selected: every skill is kept."}
+                  : choices.untickedBlocking(cliName).length
+                    ? "Tick its separate copies above to remove it."
+                    : "Nothing selected: every skill is kept."}
           </p>
           <Button ref={cancelRef} variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="destructive" disabled={remove.length === 0 || update.isPending || running} onClick={confirm}>
+          <Button
+            variant="destructive"
+            className={CONFIRM_WRAP}
+            disabled={remove.length === 0 || update.isPending || running}
+            onClick={confirm}
+          >
             {update.isPending || running ? <Spinner /> : <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />}
-            {running ? "Running…" : remove.length ? confirmLabel(0, remove.length) : "Remove"}
+            {running ? "Running…" : remove.length ? confirmLabel(0, remove.length, choices.copyCount) : "Remove"}
           </Button>
         </UpdateDialogFooter>
       </UpdateDialogShell>
@@ -134,7 +141,11 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
 
   const baseLabel =
     failure && !failure.blocking ? "Update without preview" : data?.upToDate ? "Update anyway" : "Update"
-  const updateLabel = running ? "Update running…" : remove.length ? `${baseLabel} · remove ${remove.length}` : baseLabel
+  const updateLabel = running
+    ? "Update running…"
+    : remove.length
+      ? `${baseLabel} · remove ${remove.length}${choices.copyCount ? ` · ${copies(choices.copyCount)}` : ""}`
+      : baseLabel
 
   return (
     <UpdateDialogShell open={open} onOpenChange={onOpenChange} initialFocus={cancelRef}>
@@ -174,6 +185,7 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
         </Button>
         <Button
           variant={data?.upToDate || (failure && !failure.blocking) ? "secondary" : "default"}
+          className={CONFIRM_WRAP}
           disabled={preview.isPending || !!failure?.blocking || update.isPending || running}
           onClick={confirm}
         >

@@ -26,11 +26,11 @@ import { ui, useUi } from "@/lib/ui-store"
 import { ambiguousInScope, deletedInScope, removalPlanFor, skillForCliName } from "@/lib/upstream"
 import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
-import { AmbiguousUpstreamNote, confirmLabel, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
+import { AmbiguousUpstreamNote, confirmLabel, copies, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "./file-changes"
 import { LineCounts, OverwriteWarning, overwritesFiles, summaryText } from "./preview-parts"
 import { PreviewError, PreviewLoading, TOO_LARGE_LABEL, UpToDateNote } from "./preview-states"
-import { UpdateDialogBody, UpdateDialogFooter, UpdateDialogHeader, UpdateDialogShell } from "./update-dialog-shell"
+import { CONFIRM_WRAP, UpdateDialogBody, UpdateDialogFooter, UpdateDialogHeader, UpdateDialogShell } from "./update-dialog-shell"
 
 /** Rendered once in App; ui.openUpdateAll(scope) opens it. */
 export function UpdateAllDialog() {
@@ -245,6 +245,7 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
             ? [
                 selected.length && `${plural(selected.length, "skill")} will be updated`,
                 remove.length && `${remove.length} removed`,
+                deletedChoices.copyCount && `${copies(deletedChoices.copyCount)} deleted`,
               ]
                 .filter(Boolean)
                 .join(" · ")
@@ -255,6 +256,7 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
         </Button>
         <Button
           variant={selected.length === 0 && remove.length ? "destructive" : "default"}
+          className={CONFIRM_WRAP}
           disabled={(selected.length === 0 && remove.length === 0) || run.isPending}
           onClick={confirm}
         >
@@ -263,7 +265,7 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
           ) : (
             <HugeiconsIcon icon={selected.length === 0 && remove.length ? Delete02Icon : CircleArrowUp02Icon} strokeWidth={2} />
           )}
-          {confirmLabel(selected.length, remove.length)}
+          {confirmLabel(selected.length, remove.length, deletedChoices.copyCount)}
         </Button>
       </UpdateDialogFooter>
     </>

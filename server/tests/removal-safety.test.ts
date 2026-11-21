@@ -121,14 +121,17 @@ describe("removal of deleted-upstream skills (real skills CLI, fixture HOME)", (
     expect(await exists(canonical)).toBe(true)
   })
 
-  test("an independent copy in a non-installed agent's dir is kept; canonical and link go", async () => {
+  test("an unticked copy in a non-installed agent's dir is kept; canonical and link go", async () => {
     const { fx, canonical, link } = await standard()
     // antigravity reads ~/.gemini/config/skills but is detected by ~/.gemini/antigravity.
     const copy = await fx.skill(".gemini/config/skills", "gone")
     const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
     const plan = (await w.status()).removalPlans?.find((p) => p.name === "gone")
     expect(plan?.willDelete).toEqual([canonical, link].sort())
-    expect(plan?.kept).toEqual([{ path: copy, reason: "independent copy" }])
+    expect(plan?.kept).toEqual([])
+    expect(plan?.copies).toEqual([
+      { path: copy, agent: "Antigravity, Antigravity CLI", identical: true, files: 1, blocking: false },
+    ])
     const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans: await shownPlans(w, ["gone"]) }))
     expect(job.status).toBe("success")
     expect(w.calls.find((c) => c[0] === "remove")).not.toContain("antigravity")
@@ -138,7 +141,7 @@ describe("removal of deleted-upstream skills (real skills CLI, fixture HOME)", (
     expect(await lockKeys(fx)).toEqual(["keep"])
   })
 
-  test("an independent ~/.claude copy is kept; the CLI would then keep the canonical folder too, so the name is blocked", async () => {
+  test("an unticked ~/.claude copy blocks the name: the CLI would keep the canonical folder too", async () => {
     const fx = await makeFixture()
     await fx.writeLock({ gone: {}, keep: {} })
     const canonical = await fx.skill(".agents/skills", "gone")
@@ -147,9 +150,11 @@ describe("removal of deleted-upstream skills (real skills CLI, fixture HOME)", (
     await fx.link(link, canonical)
     const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
     const plan = (await w.status()).removalPlans?.find((p) => p.name === "gone")
-    expect(plan?.willDelete).toEqual([])
-    expect(plan?.blocked).toContain(`independent folder at ${copy}`)
-    expect(plan?.kept.map((k) => k.path)).toEqual([copy, canonical])
+    expect(plan?.willDelete).toEqual([link, canonical].sort()) // once the copy is ticked
+    expect(plan?.blocked).toContain(`its own folder at ${copy}`)
+    expect(plan?.blockedUnlessCopies).toBe(true)
+    expect(plan?.copies?.map((c) => [c.path, c.blocking, c.identical])).toEqual([[copy, true, true]])
+    expect(plan?.kept).toEqual([])
     const res = await w.run({ scope: "user", remove: ["gone"], removePlans: [{ name: "gone", willDelete: [canonical, link] }] })
     expect(res.status).toBe(409)
     expect(((await res.json()) as { error: string }).error).toBe("removal_blocked")

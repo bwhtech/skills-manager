@@ -17,9 +17,10 @@ import {
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { api, errorMessage, useJobMutation, useScopes } from "@/lib/api"
+import { api, errorMessage, useJobMutation, useRemovalPlan, useScopes } from "@/lib/api"
 import { scopeLabel } from "@/lib/format"
 import { showJob } from "@/features/jobs/job-store"
+import { CopyList, copies, PathList } from "@/features/updates/deleted-upstream"
 
 const NOT_REMOVABLE =
   "This folder is in the project's own skills folder, not in an agent install folder " +
@@ -47,42 +48,108 @@ function DisabledRemoveButton() {
 
 function RemovableSkillButton({ skill }: { skill: SkillSummary }) {
   const [open, setOpen] = useState(false)
+  const [ticked, setTicked] = useState<ReadonlyMap<string, boolean>>(new Map())
   const projects = useScopes().data?.projects
+  const home = useScopes().data?.home
   const remove = useJobMutation(api.removeSkill)
+  const npx = skill.origin === "npx"
+  const planQuery = useRemovalPlan(skill.id, open && npx)
+  const plan = planQuery.data
   const scope = scopeLabel(skill.scope, projects)
   const where = skill.scope === "user" ? "user scope" : `project ${scope}`
+  const isTicked = (path: string) => ticked.get(path) ?? false
+  const tickedCopies = (plan?.copies ?? []).filter((copy) => isTicked(copy.path)).map((copy) => copy.path)
+  const untickedBlocking = (plan?.copies ?? []).filter((copy) => copy.blocking && !isTicked(copy.path))
+  const ready = !npx || (!!plan && (!plan.blocked || (plan.blockedUnlessCopies && untickedBlocking.length === 0)))
+
+  const openChange = (next: boolean) => {
+    setOpen(next)
+    if (next) setTicked(new Map())
+  }
 
   const confirm = () =>
-    remove.mutate(skill.id, {
-      onSuccess: ({ jobId }) => {
-        setOpen(false)
-        showJob(jobId)
+    remove.mutate(
+      {
+        id: skill.id,
+        ...(npx && plan
+          ? {
+              body: {
+                willDelete: plan.willDelete,
+                copies: tickedCopies,
+                shownCopies: (plan.copies ?? []).map((copy) => ({ path: copy.path, identical: copy.identical })),
+              },
+            }
+          : {}),
       },
-      onError: (error) => toast.error(`Could not remove ${skill.name}`, { description: errorMessage(error) }),
-    })
+      {
+        onSuccess: ({ jobId }) => {
+          setOpen(false)
+          showJob(jobId)
+        },
+        onError: (error) => {
+          toast.error(`Could not remove ${skill.name}`, { description: errorMessage(error) })
+          void planQuery.refetch()
+        },
+      }
+    )
 
   return (
-    <AlertDialog open={open} onOpenChange={setOpen}>
+    <AlertDialog open={open} onOpenChange={openChange}>
       <AlertDialogTrigger render={<Button variant="destructive" size="sm" className="h-7 pointer-coarse:h-10" />}>
         <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
         Remove
       </AlertDialogTrigger>
-      <AlertDialogContent>
+      <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
         <AlertDialogHeader>
           <AlertDialogTitle>
             Remove {skill.name} from {where}?
           </AlertDialogTitle>
           <AlertDialogDescription>
-            {skill.origin === "npx"
-              ? `Runs "skills remove" for ${skill.name}. Every agent in this scope loses the skill.`
+            {npx
+              ? `Runs "skills remove" for ${skill.cliName ?? skill.name}. Every agent in this scope loses the skill.`
               : `Deletes the folder ${skill.realPath} if it lives in a skills folder, and removes links to it there. A folder that is only linked in from elsewhere is kept. This cannot be undone.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {npx && (
+          <div className="flex min-w-0 flex-col gap-1 text-left">
+            {planQuery.isPending ? (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Spinner className="size-3.5" /> Working out what would be deleted…
+              </p>
+            ) : planQuery.isError ? (
+              <p className="text-xs text-destructive">Could not work out what would be deleted: {errorMessage(planQuery.error)}</p>
+            ) : plan ? (
+              <>
+                {plan.blocked && !plan.blockedUnlessCopies && <p className="text-xs text-destructive">{plan.blocked}</p>}
+                {plan.blockedUnlessCopies && untickedBlocking.length > 0 && (
+                  <p className="text-xs text-amber-700 dark:text-amber-300">
+                    Tick its separate {untickedBlocking.length === 1 ? "copy" : "copies"} to remove it: while{" "}
+                    {untickedBlocking.length === 1 ? "it exists" : "they exist"}, skills remove keeps the skill.
+                  </p>
+                )}
+                {plan.willDelete.length > 0 ? (
+                  <PathList label="Deletes" paths={plan.willDelete.map((path) => ({ path }))} home={home} destructive />
+                ) : (
+                  !plan.blocked && <p className="text-xs text-muted-foreground">No folders on disk: only the lock entry is removed.</p>
+                )}
+                {(plan.copies?.length ?? 0) > 0 && (
+                  <CopyList
+                    copies={plan.copies ?? []}
+                    home={home}
+                    isTicked={isTicked}
+                    onTick={(path, value) => setTicked((prev) => new Map(prev).set(path, value))}
+                  />
+                )}
+                {plan.kept.length > 0 && <PathList label="Kept" paths={plan.kept} home={home} />}
+              </>
+            ) : null}
+          </div>
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction variant="destructive" disabled={remove.isPending} onClick={confirm}>
+          <AlertDialogAction variant="destructive" disabled={remove.isPending || !ready} onClick={confirm}>
             {remove.isPending && <Spinner />}
-            Remove
+            {tickedCopies.length ? `Remove · ${copies(tickedCopies.length)}` : "Remove"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

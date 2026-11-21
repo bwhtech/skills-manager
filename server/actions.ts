@@ -5,6 +5,7 @@ import {
   updateTargetsOverlap,
   type InstallRequest,
   type Job,
+  type ShownRemovalPlan,
   type UpdateTarget,
 } from "../shared/api.ts"
 import { parseCheckOutput } from "./cli/parsers.ts"
@@ -20,7 +21,7 @@ import { cleanLine } from "./lib/ansi.ts"
 import { forbidden, HttpError } from "./lib/errors.ts"
 import { isInside, realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
-import type { RemovalGuard } from "./removal/guard.ts"
+import { checkShown, logCopies, type RemovalGuard, type ShownPlans } from "./removal/guard.ts"
 import type { PlannedRemoval } from "./removal/plan.ts"
 
 /** How an update step went. */
@@ -57,11 +58,11 @@ export interface UpdateJobRequest {
   names: string[]
   /**
    * deleted-upstream removals, authorized by RemovalGuard.authorize: their plans at request
-   * time, and the willDelete lists the dialog showed
+   * time, and what the dialog showed and ticked per name
    */
   remove?: {
     plans: PlannedRemoval[]
-    shown: ReadonlyMap<string, readonly string[]>
+    shown: ShownPlans
   }
 }
 
@@ -204,7 +205,7 @@ export class SkillActions {
     guard: RemovalGuard,
     scope: string,
     names: string[],
-    shown: ReadonlyMap<string, readonly string[]>,
+    shown: ShownPlans,
     cwd: string,
     log: JobLog
   ): Promise<{ ok: boolean; removed: string[] }> {
@@ -215,21 +216,60 @@ export class SkillActions {
       log(`Nothing removed: ${(err as Error).message}`)
       return { ok: false, removed: [] }
     }
+    if (prepared.groups.length === 0) {
+      log("Nothing was removed.")
+      return { ok: prepared.failed.length === 0, removed: [] }
+    }
+    const result = await this.runRemoval(guard, scope, prepared.groups.flatMap((g) => g.plans), cwd, log)
+    return { ok: result.ok && prepared.failed.length === 0, removed: result.removed }
+  }
+
+  /**
+   * Confirmed plans: delete the ticked copies first (all of them; one failure stops before
+   * any `skills remove`), then per set of agents re-check the plans right before the call,
+   * run `skills remove`, and verify against the snapshot taken by the re-check.
+   */
+  private async runRemoval(
+    guard: RemovalGuard,
+    scope: string,
+    plans: PlannedRemoval[],
+    cwd: string,
+    log: JobLog
+  ): Promise<{ ok: boolean; removed: string[] }> {
+    const copies = plans.flatMap((p) => p.deleteCopies)
+    const deleted: string[] = []
+    for (const path of copies) {
+      if (await deleteCopyFolder(path, scope, guard.home, log)) {
+        deleted.push(path)
+        continue
+      }
+      log(`Stopped before skills remove: the separate copy ${path} could not be deleted. Nothing else was removed.`)
+      log(`  deleted: ${deleted.length ? deleted.join(", ") : "(none)"}`)
+      log(`  not deleted: ${copies.filter((c) => !deleted.includes(c)).join(", ")}`)
+      return { ok: false, removed: [] }
+    }
     const removed: string[] = []
-    let ok = prepared.failed.length === 0
-    for (const group of prepared.groups) {
-      const args = removeArgsFor(scope, group.plans.map((p) => p.name), group.agents)
+    let ok = true
+    for (const group of groupPlans(plans)) {
+      const names = group.plans.map((p) => p.name)
+      const checked = await guard.recheck(scope, group.plans)
+      if (!checked.ok) {
+        ok = false
+        log(`Skipped ${names.join(", ")} (removal_plan_changed): ${checked.reason}. Open the dialog again.`)
+        continue
+      }
+      const args = removeArgsFor(scope, names, group.agents)
       log(`$ ${this.cli.display(args)}`)
       const step = await this.runStep(args, cwd, log)
-      const verified = await guard.verify(scope, group.plans, step.output, step.code)
+      const verified = await guard.verify(scope, group.plans, step.output, step.code, checked.snapshot)
       removed.push(...verified.removed)
       for (const item of verified.incomplete) {
         ok = false
         log(`Incomplete removal of ${item.name}: ${item.problems.join("; ")}`)
       }
     }
-    if (prepared.groups.length === 0) log("Nothing was removed.")
-    else if (removed.length) log(`Removed and verified: ${removed.join(", ")}`)
+    if (deleted.length) log(`Deleted separate copies: ${deleted.join(", ")}`)
+    if (removed.length) log(`Removed and verified: ${removed.join(", ")}`)
     return { ok, removed }
   }
 
@@ -254,20 +294,22 @@ export class SkillActions {
   }
 
   /**
-   * Remove one skill. npx skills: `skills remove` with -a limited by the plan (independent
-   * same-named copies stay), refused (409) when the plan is blocked, and checked on disk
-   * afterwards. `plan` comes from RemovalGuard.plans at request time.
+   * Remove one skill. npx skills: the ticked copies first, then `skills remove` with -a
+   * limited by the plan (other same-named copies stay), refused (409) when the plan is
+   * blocked, and checked on disk afterwards. `plan` comes from RemovalGuard.plans (intent
+   * "remove", the ticked copies as gone) at request time; `shown` is what the dialog showed.
    */
-  remove(skill: IndexedSkill, plan?: PlannedRemoval): Job {
+  remove(skill: IndexedSkill, plan?: PlannedRemoval, shown?: ShownRemovalPlan): Job {
     if (skill.origin === "npx") {
       if (!plan || !this.guard)
         throw new HttpError(500, "internal", "Removal is not available")
-      if (plan.blocked)
-        throw new HttpError(
-          409,
-          plan.blockCode === "collision" ? "removal_conflict" : "removal_blocked",
-          plan.blocked
-        )
+      const asShown: ShownRemovalPlan = shown ?? {
+        willDelete: plan.willDelete,
+        copies: plan.deleteCopies,
+        shownCopies: plan.copies.map((c) => ({ path: c.path, identical: c.identical })),
+      }
+      const refusal = checkShown(plan, asShown)
+      if (refusal) throw refusal
       const guard = this.guard
       const args = removeArgsFor(skill.scope, [skill.cliName], plan.agents)
       const cwd = scopeCwd(skill.scope)
@@ -279,19 +321,19 @@ export class SkillActions {
         cwd,
         run: async (log) => {
           // The disk may have changed since the request: plan again, never wider.
-          const [now] = await guard.plans(skill.scope, [skill.cliName])
-          const extra = now.willDelete.filter((p) => !plan.willDelete.includes(p))
-          if (now.blocked || extra.length || now.agents.join(" ") !== plan.agents.join(" ")) {
-            log(`Nothing removed: ${now.blocked ?? `what would be deleted changed (${extra.join(", ") || "other agents"})`}`)
+          const [now] = await guard.plans(skill.scope, [skill.cliName], {
+            intent: "remove",
+            gone: new Map([[skill.cliName, plan.deleteCopies]]),
+          })
+          const changed = checkShown(now, asShown)
+          if (changed || now.agents.join(" ") !== plan.agents.join(" ")) {
+            log(`Nothing removed: ${changed ? (changed.detail ?? changed.message) : "the agents to pass changed"}`)
             return 1
           }
-          for (const k of now.kept) log(`Kept: ${k.reason} at ${k.path}`)
-          const step = await this.runStep(args, cwd, log)
-          const verified = await guard.verify(skill.scope, [now], step.output, step.code)
-          removed = verified.removed
-          for (const item of verified.incomplete)
-            log(`Incomplete removal of ${item.name}: ${item.problems.join("; ")}`)
-          return verified.incomplete.length ? 1 : 0
+          logCopies(now, log)
+          const result = await this.runRemoval(guard, skill.scope, [now], cwd, log)
+          removed = result.removed
+          return result.ok ? 0 : 1
         },
         onDone: () => {
           this.hooks.afterRemove?.(skill.scope, removed, [skill.cliName])
@@ -495,6 +537,31 @@ export async function removeManualSkill(
   }
   const ok = await deleteSkillFolder(owner, skill.realPath, home, log, hooks)
   return ok ? 0 : 1
+}
+
+/**
+ * Deletes a separate copy of an npx skill that the user ticked: a real folder directly in a
+ * verified agent skills dir (no symlink from the scope root down to it), with the same
+ * trash-and-verify steps as a manual skill folder (device and inode checked after the move).
+ */
+export async function deleteCopyFolder(
+  path: string,
+  scope: string,
+  home: string,
+  log: JobLog,
+  hooks: RemoveHooks = {}
+): Promise<boolean> {
+  const placement: SkillPlacement = { path, root: dirname(path), scope, deletable: true }
+  const realRoot = await verifiedSkillsDir(placement, home)
+  if (!realRoot) {
+    log(`Refused to delete ${path}: its skills dir links outside the scope.`)
+    return false
+  }
+  if (isUnsafeToDelete(path, home)) {
+    log(`Refused to delete ${path}`)
+    return false
+  }
+  return deleteSkillFolder(placement, join(realRoot, basename(path)), home, log, hooks)
 }
 
 /** Verify, move into a trash dir, verify again, then delete. */

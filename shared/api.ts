@@ -154,11 +154,21 @@ export interface FileContent {
 // PUT /api/skills/:id/skill-md  SaveRequest -> SaveResponse
 //   403 if the skill is not editable. 409 SaveConflict if the file on disk no longer
 //   has baseHash (compared under a per-file lock keyed by the canonical path).
-// DELETE /api/skills/:id                 -> JobRef
-//   npx skills: runs `skills remove -s <cliName> -y` (+ -g for user scope, cwd = project).
+// GET /api/skills/:id/removal-plan       -> RemovalPlan  (npx skills only; 400 otherwise)
+//   What DELETE would do. An explicit Remove counts a copy at an agent install path as part of
+//   the install when its content matches what the CLI installed for the lock entry (the
+//   canonical folder, or the project lock's computedHash): it is in willDelete. Other copies
+//   are opt-in (RemovalPlan.copies), as for deleted-upstream removal.
+// DELETE /api/skills/:id  RemoveSkillRequest (optional body) -> JobRef
+//   npx skills: runs `skills remove -s <cliName> -a <agents> -y` (+ -g for user scope,
+//   cwd = project), after deleting the ticked copies. With a body, the same checks as
+//   UpdateRunRequest.removePlans (400 / 409 removal_blocked / 409 removal_plan_changed).
 //   On success the skill leaves UpdateStatus.deletedUpstream.
 //   manual skills: the server deletes the folder itself (job logs what it did).
 //   403 for plugin, synced, system, and for skills with removable: false.
+
+/** DELETE /api/skills/:id body: what the Remove dialog showed and ticked (npx skills). */
+export type RemoveSkillRequest = ShownRemovalPlan
 
 export interface SaveRequest {
   content: string
@@ -270,10 +280,68 @@ export interface RemovalPlan {
    * lock entry is left to remove.
    */
   willDelete: string[]
-  /** Same-named placements that stay, and why (e.g. "independent copy"). */
+  /**
+   * Same-named placements that stay and are never offered for deletion, and why: links to
+   * other folders, anything outside a verified agent skills dir, plugin, synced and system
+   * dirs, non-dot project dirs, folders without a SKILL.md.
+   */
   kept: { path: string; reason: string }[]
-  /** Set when the name cannot be removed here: the reason. The UI must not offer the name. */
+  /**
+   * Independent copies (real folders, not links to the canonical folder) in a verified agent
+   * skills dir that block the removal or that `skills remove` would leave behind. Each one is
+   * opt-in: it is deleted only when the request lists it in removePlans[].copies.
+   */
+  copies?: RemovalCopy[]
+  /**
+   * Set when the name cannot be removed here: the reason. The UI must not offer the name,
+   * unless blockedUnlessCopies is set.
+   */
   blocked?: string
+  /**
+   * The name is blocked only by copies with `blocking: true`. It becomes removable when the
+   * request ticks all of them; willDelete then says what `skills remove` deletes.
+   */
+  blockedUnlessCopies?: boolean
+}
+
+/** One independent same-named copy of a skill, in an agent skills dir. */
+export interface RemovalCopy {
+  /** absolute path of the copy folder */
+  path: string
+  /** the label(s) of the agent(s) whose skills dir holds it, e.g. "Claude Code" */
+  agent: string
+  /**
+   * Same files and bytes as the canonical folder (compared like the update preview compares
+   * folders, with the same limits). False when anything differs, when there is no canonical
+   * folder, or when the folders are too large to compare.
+   */
+  identical: boolean
+  /** files that differ (added, removed or changed), when known */
+  differences?: number
+  /** files in the copy (at most the preview limit, see tooLarge) */
+  files: number
+  /** too many files or bytes to compare: not identical */
+  tooLarge?: boolean
+  /** short reason when not identical, e.g. "3 files differ" or "no canonical folder to compare with" */
+  reason?: string
+  /** the skills CLI keeps the canonical folder and the lock entry while this copy exists */
+  blocking: boolean
+}
+
+/**
+ * What the dialog showed for one name and what the user ticked. The server never deletes a
+ * path that is not listed here.
+ */
+export interface ShownRemovalPlan {
+  /** RemovalPlan.willDelete as shown */
+  willDelete: string[]
+  /** the paths of RemovalPlan.copies the user ticked: deleted before skills remove runs */
+  copies?: string[]
+  /**
+   * every copy the dialog listed, with the identical flag it showed. When set, a copy list or
+   * an identical flag that differs from the server's current plan is 409 removal_plan_changed.
+   */
+  shownCopies?: { path: string; identical: boolean }[]
 }
 
 // GET  /api/updates            -> UpdateStatus  (cached; the server starts a check on boot)
@@ -293,6 +361,16 @@ export interface RemovalPlan {
 //   _ . : + @ -); never a leading "-" or a control character (400).
 //   400 unless every remove name is in UpdateStatus.deletedUpstream for that scope, its lock
 //   entry is still the one it was found deleted for, and removePlans lists it.
+//   Copies: removePlans[].copies may list only paths of that name's current RemovalPlan.copies
+//   (400 otherwise). 409 "removal_blocked" while a copy with blocking: true is not ticked.
+//   409 "removal_plan_changed" when shownCopies differs from the current copies (a copy came,
+//   went, or its identical flag changed). In the job, after the fresh upstream recheck, each
+//   ticked copy is deleted first (moved to a trash dir inside its verified skills dir, checked
+//   by device and inode, then deleted); if one fails, nothing else runs. Then `skills remove`
+//   runs. Each group of names is planned again right before its call and skipped when its lock
+//   entry or the paths the CLI would touch changed. Afterwards: ticked copies gone, unticked
+//   copies and kept paths still there, no other path the CLI could touch gone, and the lock file
+//   readable and without the entry.
 //   409 "removal_conflict" when a name collides with another lock key under the CLI's
 //   sanitizeName, or would resolve to another lock key; 409 "removal_blocked" when its plan is
 //   blocked; 409 "removal_plan_changed" when the server would delete a path that the
@@ -314,9 +392,9 @@ export interface UpdateRunRequest {
   remove?: string[]
   /**
    * Required with `remove`: for each name, the RemovalPlan.willDelete list that the dialog
-   * showed. The server never deletes a path that is not listed here.
+   * showed, and the copies the user ticked. The server never deletes a path that is not listed.
    */
-  removePlans?: { name: string; willDelete: string[] }[]
+  removePlans?: ({ name: string } & ShownRemovalPlan)[]
 }
 
 // GET /api/skills/:id/update-preview -> UpdatePreview

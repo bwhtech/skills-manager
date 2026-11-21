@@ -74,6 +74,33 @@ export async function diffFolders(
     collectFiles(oldRoot, { maxFiles, label: "local" }),
     collectFiles(newRoot, { cliExclusions: true, maxFiles, label: "upstream" }),
   ])
+  return diffFileMaps(before, after, newOverrides, limits)
+}
+
+/**
+ * Compares two local folders, e.g. a skill's canonical folder with a same-named copy. Both
+ * sides are walked the same way (only `.git` is left out), with the preview's limits: a
+ * limit passed is a 413, never a partial result. `fileCount` is the number of files in `b`.
+ */
+export async function diffLocalFolders(
+  a: string,
+  b: string,
+  limits: DiffLimits = DEFAULT_LIMITS
+): Promise<DiffResult & { fileCount: number }> {
+  const maxFiles = limits.maxFilesPerSide
+  const [before, after] = await Promise.all([
+    collectFiles(a, { maxFiles, label: "canonical" }),
+    collectFiles(b, { maxFiles, label: "copy" }),
+  ])
+  return { ...(await diffFileMaps(before, after, new Map(), limits)), fileCount: after.size }
+}
+
+async function diffFileMaps(
+  before: FileMap,
+  after: FileMap,
+  newOverrides: Map<string, Uint8Array>,
+  limits: DiffLimits
+): Promise<DiffResult> {
   const pairs = [...new Set([...before.keys(), ...after.keys()])].map(
     (path) => {
       const old = before.get(path)

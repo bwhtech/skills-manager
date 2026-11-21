@@ -15,6 +15,8 @@ import {
   type InstructionFile,
   type Job,
   type JobRef,
+  type RemovalPlan,
+  type RemoveSkillRequest,
   type RepoSkill,
   type SaveInstructionRequest,
   type SaveRequest,
@@ -113,7 +115,9 @@ export const api = {
     request<FileContent>("GET", `/api/skills/${id}/file?${q({ path })}`),
   saveSkillMd: (id: string, body: SaveRequest) =>
     request<SaveResponse>("PUT", `/api/skills/${id}/skill-md`, body),
-  removeSkill: (id: string) => request<JobRef>("DELETE", `/api/skills/${id}`),
+  removeSkill: ({ id, body }: { id: string; body?: RemoveSkillRequest }) =>
+    request<JobRef>("DELETE", `/api/skills/${id}`, body),
+  removalPlan: (id: string) => request<RemovalPlan>("GET", `/api/skills/${id}/removal-plan`),
 
   instructions: (scope: ScopeKey) =>
     request<InstructionFile[]>("GET", `/api/instructions?${q({ scope })}`),
@@ -278,6 +282,18 @@ export function updatePreviewQuery(id: string | null, enabled = true) {
     enabled: !!id && enabled,
     staleTime: 5 * 60_000,
     gcTime: 10 * 60_000,
+    retry: false,
+  })
+}
+
+/** What Remove would delete for an npx skill, from the disk now. Always fresh. */
+export function useRemovalPlan(id: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["removal-plan", id ?? ""],
+    queryFn: () => api.removalPlan(id!),
+    enabled: !!id && enabled,
+    staleTime: 0,
+    gcTime: 0,
     retry: false,
   })
 }

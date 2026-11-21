@@ -1,7 +1,8 @@
 import { useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
 import { Alert02Icon, ArrowRight01Icon, Delete02Icon } from "@hugeicons/core-free-icons"
-import type { RemovalPlan, ScopeKey, UpstreamSkillRef } from "@shared/api"
+import type { RemovalCopy, RemovalPlan, ScopeKey, ShownRemovalPlan, UpstreamSkillRef } from "@shared/api"
+import { Badge } from "@/components/ui/badge"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
@@ -15,7 +16,10 @@ import { cn } from "@/lib/utils"
 // deletes them; the dialogs remove them in a second step of the same job.
 
 export interface DeletedChoices {
-  /** the skills that can be offered: the server sent a plan that is not blocked */
+  /**
+   * the skills that can be offered: the server sent a plan that is not blocked, or that is
+   * blocked only until its blocking copies are ticked (blockedUnlessCopies)
+   */
   items: UpstreamSkillRef[]
   /** skills that are not offered, and why: the server would refuse them */
   dropped: { item: UpstreamSkillRef; reason: string; plan: RemovalPlan | null }[]
@@ -24,15 +28,22 @@ export interface DeletedChoices {
   setChecked: (name: string, checked: boolean) => void
   /** why a skill cannot be picked (an update or remove of it is running), else null */
   blockReason: (name: string) => string | null
+  /** blocking copies of the skill that are not ticked yet: it stays off until they are */
+  untickedBlocking: (name: string) => RemovalCopy[]
+  isCopyTicked: (path: string) => boolean
+  setCopyTicked: (path: string, ticked: boolean) => void
   /** the CLI names to send as UpdateRunRequest.remove */
   selected: string[]
-  /** UpdateRunRequest.removePlans: what the section showed for each selected name */
-  removePlans: { name: string; willDelete: string[] }[]
+  /** ticked copies of the selected skills */
+  copyCount: number
+  /** UpdateRunRequest.removePlans: what the section showed and ticked for each selected name */
+  removePlans: ({ name: string } & ShownRemovalPlan)[]
 }
 
 /**
- * Ticked by default: the user asked for deleted skills to go automatically. Only names with a
- * removal plan that is not blocked are offered; the rest are listed as dropped, with the reason.
+ * Skills are ticked by default: the user asked for deleted skills to go automatically. Their
+ * separate copies are not: each one is opt-in. A skill blocked only by copies is offered, but
+ * stays off until all its blocking copies are ticked. The rest are listed as dropped.
  */
 export function useDeletedChoices(
   all: UpstreamSkillRef[],
@@ -40,34 +51,64 @@ export function useDeletedChoices(
   blockReason: (name: string) => string | null = () => null
 ): DeletedChoices {
   const [choices, setChoices] = useState<ReadonlyMap<string, boolean>>(new Map())
+  const [copyChoices, setCopyChoices] = useState<ReadonlyMap<string, boolean>>(new Map())
   const items: UpstreamSkillRef[] = []
   const dropped: DeletedChoices["dropped"] = []
   for (const item of all) {
     const plan = planFor(item.name)
     if (!plan) dropped.push({ item, reason: "Not checked yet: refresh to see what would be removed.", plan })
-    else if (plan.blocked) dropped.push({ item, reason: plan.blocked, plan })
+    else if (plan.blocked && !plan.blockedUnlessCopies) dropped.push({ item, reason: plan.blocked, plan })
     else items.push(item)
   }
+  const isCopyTicked = (path: string) => copyChoices.get(path) ?? false
+  const untickedBlocking = (name: string) =>
+    (planFor(name)?.copies ?? []).filter((copy) => copy.blocking && !isCopyTicked(copy.path))
   const isChecked = (name: string) =>
-    !blockReason(name) && items.some((item) => item.name === name) && (choices.get(name) ?? true)
+    !blockReason(name) &&
+    items.some((item) => item.name === name) &&
+    untickedBlocking(name).length === 0 &&
+    (choices.get(name) ?? true)
   const selected = items.filter((item) => isChecked(item.name)).map((item) => item.name)
+  const tickedOf = (name: string) =>
+    (planFor(name)?.copies ?? []).filter((copy) => isCopyTicked(copy.path)).map((copy) => copy.path)
   return {
     items,
     dropped,
     planFor,
     isChecked,
     blockReason,
+    untickedBlocking,
+    isCopyTicked,
+    setCopyTicked: (path, ticked) => setCopyChoices((prev) => new Map(prev).set(path, ticked)),
     setChecked: (name, checked) => setChoices((prev) => new Map(prev).set(name, checked)),
     selected,
-    removePlans: selected.map((name) => ({ name, willDelete: planFor(name)?.willDelete ?? [] })),
+    copyCount: selected.reduce((sum, name) => sum + tickedOf(name).length, 0),
+    removePlans: selected.map((name) => {
+      const plan = planFor(name)
+      return {
+        name,
+        willDelete: plan?.willDelete ?? [],
+        copies: tickedOf(name),
+        shownCopies: (plan?.copies ?? []).map((copy) => ({ path: copy.path, identical: copy.identical })),
+      }
+    }),
   }
 }
 
-/** "Update 22 · remove 1", "Update · remove 1", "Remove 2 skills", "Update 3 skills". */
-export function confirmLabel(updateCount: number | null, removeCount: number) {
-  if (updateCount === 0) return removeCount ? `Remove ${plural(removeCount, "skill")}` : "Update"
+/** "1 copy", "6 copies". */
+export function copies(n: number) {
+  return `${n} ${n === 1 ? "copy" : "copies"}`
+}
+
+/**
+ * "Update 22 · remove 1", "Update · remove 1", "Remove 2 skills", "Update 3 skills", with
+ * " · 6 copies" when separate copies are ticked: "Remove 6 skills · 6 copies".
+ */
+export function confirmLabel(updateCount: number | null, removeCount: number, copyCount = 0) {
+  const tail = copyCount ? ` · ${copies(copyCount)}` : ""
+  if (updateCount === 0) return removeCount ? `Remove ${plural(removeCount, "skill")}${tail}` : "Update"
   const update = updateCount === null ? "Update" : `Update ${removeCount ? updateCount : plural(updateCount, "skill")}`
-  return removeCount ? `${update} · remove ${removeCount}` : update
+  return removeCount ? `${update} · remove ${removeCount}${tail}` : update
 }
 
 export function DeletedUpstreamSection({
@@ -97,8 +138,8 @@ export function DeletedUpstreamSection({
         </h3>
         <p className="text-xs text-muted-foreground">
           These skills are gone from their source, so skills update skips them. For each ticked skill, the folders
-          listed under it are deleted, including any local edits. Same-named folders that are not links to it stay.
-          Untick a skill to keep it.
+          listed under it are deleted, including any local edits. Separate copies (real folders, not links to it)
+          stay unless you tick them. Untick a skill to keep it.
         </p>
       </div>
       {groups.map((group) => (
@@ -141,7 +182,7 @@ function DroppedList({ dropped }: { dropped: DeletedChoices["dropped"] }) {
 }
 
 /** "Deletes" or "Kept" lines under a row: one path per line, with the reason for kept ones. */
-function PathList({
+export function PathList({
   label,
   paths,
   home,
@@ -176,7 +217,9 @@ function DeletedRow({ scope, item, choices }: { scope: ScopeKey; item: UpstreamS
   const detail = useSkill(skill?.id ?? null)
   const files = detail.data?.files
   const checked = choices.isChecked(item.name)
-  const blocked = choices.blockReason(item.name)
+  const running = choices.blockReason(item.name)
+  const locked = choices.untickedBlocking(item.name).length > 0
+  const blocked = running ?? (locked ? "Tick its copies to remove it" : null)
   const plan = choices.planFor(item.name)
   const fileCount = files ? (files.length >= 500 ? "500+ files" : plural(files.length, "file")) : null
 
@@ -214,10 +257,12 @@ function DeletedRow({ scope, item, choices }: { scope: ScopeKey; item: UpstreamS
               {item.name}
             </span>
             <span className="ml-auto flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground tabular-nums">
-              {blocked ? (
+              {running ? (
                 <>
-                  <Spinner className="size-3.5" /> {blocked}
+                  <Spinner className="size-3.5" /> {running}
                 </>
+              ) : locked ? (
+                <span className="text-amber-700 dark:text-amber-300">Tick its copies to remove it</span>
               ) : !skill ? (
                 "folder not in the skill list"
               ) : detail.isPending ? (
@@ -230,18 +275,35 @@ function DeletedRow({ scope, item, choices }: { scope: ScopeKey; item: UpstreamS
           </CollapsibleTrigger>
         </div>
         {plan && (
-          <div className={cn("flex flex-col gap-1 px-3 pb-2 pl-10", !checked && "opacity-60")}>
-            {plan.willDelete.length > 0 ? (
-              <PathList
-                label={checked ? "Deletes" : "Would delete"}
-                paths={plan.willDelete.map((path) => ({ path }))}
+          <div className="flex flex-col gap-1 px-3 pb-2 pl-10">
+            <div className={cn("flex flex-col gap-1", !checked && "opacity-60")}>
+              {plan.willDelete.length > 0 ? (
+                <PathList
+                  label={checked ? "Deletes" : "Would delete"}
+                  paths={plan.willDelete.map((path) => ({ path }))}
+                  home={home}
+                  destructive={checked}
+                />
+              ) : (
+                <p className="text-xs text-muted-foreground">No folders on disk: only the lock entry is removed.</p>
+              )}
+            </div>
+            {(plan.copies?.length ?? 0) > 0 && (
+              <CopyList
+                copies={plan.copies ?? []}
                 home={home}
-                destructive={checked}
+                isTicked={choices.isCopyTicked}
+                onTick={choices.setCopyTicked}
+                // Copies of a skill that is unticked (and not waiting for them) are not sent.
+                inactive={!checked && !locked}
+                disabled={!!running}
               />
-            ) : (
-              <p className="text-xs text-muted-foreground">No folders on disk: only the lock entry is removed.</p>
             )}
-            {plan.kept.length > 0 && <PathList label="Kept" paths={plan.kept} home={home} />}
+            {plan.kept.length > 0 && (
+              <div className={cn(!checked && "opacity-60")}>
+                <PathList label="Kept" paths={plan.kept} home={home} />
+              </div>
+            )}
           </div>
         )}
         <CollapsibleContent>
@@ -255,6 +317,93 @@ function DeletedRow({ scope, item, choices }: { scope: ScopeKey; item: UpstreamS
         </CollapsibleContent>
       </Collapsible>
     </li>
+  )
+}
+
+/**
+ * "Separate copies": same-named real folders in other agents' skills dirs. Each one is opt-in
+ * (unticked by default) and says whether it matches the canonical folder.
+ */
+export function CopyList({
+  copies: list,
+  home,
+  isTicked,
+  onTick,
+  inactive,
+  disabled,
+}: {
+  copies: RemovalCopy[]
+  home: string | undefined
+  isTicked: (path: string) => boolean
+  onTick: (path: string, ticked: boolean) => void
+  /** shown dimmed: ticking them does nothing until the skill itself is ticked */
+  inactive?: boolean
+  disabled?: boolean
+}) {
+  return (
+    <div className="mt-1 flex flex-col gap-1" role="group" aria-label="Separate copies">
+      <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Separate copies</span>
+      <ul className={cn("flex flex-col gap-1", inactive && "opacity-60")}>
+        {list.map((copy) => {
+          const ticked = isTicked(copy.path)
+          return (
+            <li key={copy.path}>
+              <label
+                className={cn(
+                  "flex min-h-11 items-start gap-2.5 rounded-lg border border-dashed px-2.5 py-2 transition-colors",
+                  ticked ? "border-destructive/40 bg-destructive/5" : "bg-background/60",
+                  disabled ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/40"
+                )}
+              >
+                <Checkbox
+                  className="mt-0.5"
+                  checked={ticked}
+                  disabled={disabled}
+                  onCheckedChange={(value) => onTick(copy.path, value)}
+                  aria-label={`Delete the separate copy ${copy.path} (${copy.identical ? "identical" : "differs"})`}
+                />
+                <span className="flex min-w-0 flex-1 flex-col gap-1">
+                  <span
+                    className={cn("font-mono text-xs break-all", ticked ? "text-destructive" : "text-foreground")}
+                    title={copy.path}
+                  >
+                    {tildify(copy.path, home)}
+                  </span>
+                  <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground tabular-nums">
+                    <span>{copy.agent}</span>
+                    <CopyBadge copy={copy} />
+                    <span>{copy.tooLarge ? `${copy.files.toLocaleString("en-US")}+ files` : plural(copy.files, "file")}</span>
+                    {copy.blocking && !ticked && (
+                      <span className="text-amber-700 dark:text-amber-300">· keeps the skill while it exists</span>
+                    )}
+                  </span>
+                </span>
+              </label>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+function CopyBadge({ copy }: { copy: RemovalCopy }) {
+  if (copy.identical)
+    return (
+      <Badge variant="secondary" className="h-5 px-1.5 font-normal">
+        identical
+      </Badge>
+    )
+  const detail =
+    copy.differences !== undefined ? plural(copy.differences, "file") : copy.tooLarge ? "too large to compare" : copy.reason
+  return (
+    <Badge
+      variant="outline"
+      className="h-5 border-amber-500/40 bg-amber-500/10 px-1.5 font-normal text-amber-800 dark:text-amber-200"
+      title={copy.reason}
+    >
+      differs{detail ? ` · ${detail}` : ""}
+    </Badge>
   )
 }
 

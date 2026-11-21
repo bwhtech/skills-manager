@@ -111,6 +111,71 @@ export async function fetchDownload(
   return new StaticCheckout(source, found)
 }
 
+/** fetch, as the strict index check uses it (a test seam). */
+export type FetchLike = (url: string, init: { signal: AbortSignal }) => Promise<Response>
+
+/**
+ * The skill names a well-known source's indexes list, for deciding that a skill is gone.
+ * Mirrors the CLI's fetchIndexCandidates and the scope filter of discoverSkills (the same
+ * index URLs in the same order), but keeps every error: the CLI turns a network error, a bad
+ * status or a failed artifact download into "no skills", which would read as "deleted".
+ *
+ * - A network error, a status other than 404 or 410, or a body that is not JSON: 502.
+ * - No index found at all (every candidate 404/410 or not an index): 502, as nothing proves
+ *   the skill is gone.
+ * - Names come from the index entries themselves (any entry with a string name), never from
+ *   the artifacts that happened to download.
+ */
+export async function wellKnownIndexNames(
+  url: string,
+  signal: AbortSignal,
+  fetchFn: FetchLike = (u, init) => fetch(u, init)
+): Promise<string[][]> {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new HttpError(400, "unsupported_source", `Not a URL: ${url}`)
+  }
+  const basePath = parsed.pathname.replace(/\/$/, "")
+  const origin = `${parsed.protocol}//${parsed.host}`
+  const tries: { indexUrl: string; base: string }[] = []
+  for (const wellKnown of [".well-known/agent-skills", ".well-known/skills"]) {
+    tries.push({ indexUrl: `${origin}${basePath}/${wellKnown}/index.json`, base: `${origin}${basePath}` })
+    if (basePath) tries.push({ indexUrl: `${origin}/${wellKnown}/index.json`, base: origin })
+  }
+  const found: { base: string; names: string[] }[] = []
+  for (const { indexUrl, base } of tries) {
+    let response: Response
+    try {
+      response = await fetchFn(indexUrl, { signal })
+    } catch (err) {
+      if (signal.aborted) throw new HttpError(504, "fetch_timeout", "Fetching the source timed out")
+      throw new HttpError(502, "fetch_failed", `Could not fetch ${indexUrl}: ${(err as Error).message}`)
+    }
+    if (response.status === 404 || response.status === 410) continue
+    if (!response.ok)
+      throw new HttpError(502, "fetch_failed", `${indexUrl} answered ${response.status}`)
+    let raw: unknown
+    try {
+      raw = await response.json()
+    } catch {
+      throw new HttpError(502, "fetch_failed", `${indexUrl} is not valid JSON`)
+    }
+    const skills = (raw as { skills?: unknown } | null)?.skills
+    if (!Array.isArray(skills)) continue
+    const names = skills
+      .map((entry) => (entry as { name?: unknown } | null)?.name)
+      .filter((name): name is string => typeof name === "string")
+    found.push({ base, names })
+  }
+  // discoverSkills: a URL with a path never falls back to the root index.
+  const scoped = basePath ? found.filter((c) => c.base !== origin) : found
+  if (scoped.length === 0)
+    throw new HttpError(502, "fetch_failed", `No skills index found for ${url}; could not verify that the skill is gone`)
+  return scoped.map((c) => c.names)
+}
+
 /**
  * Runs the CLI's discoverSkills over a copy of just what it reads: each
  * SKILL.md (its first 64 KB: discovery uses the frontmatter only) and the

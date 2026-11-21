@@ -7,7 +7,7 @@ import type { ScopeKey } from "../../shared/api.ts"
 import { SkillActions } from "../actions.ts"
 import type { SkillsCli } from "../cli/skills-cli.ts"
 import { config } from "../config.ts"
-import { readLock, type LockEntry, type LockReader } from "../discovery/locks.ts"
+import { readLock, readLockStrict, type LockEntry, type LockReader } from "../discovery/locks.ts"
 import type { ProjectService } from "../discovery/projects.ts"
 import { cleanLine } from "../lib/ansi.ts"
 import { handleError } from "../lib/errors.ts"
@@ -27,6 +27,7 @@ export interface Fixture {
   home: string
   lockPath: string
   readLock: LockReader
+  readLockStrict: LockReader
   skill(dir: string, name: string): Promise<string>
   link(path: string, target: string): Promise<void>
   writeLock(entries: Record<string, Partial<LockEntry>>): Promise<void>
@@ -44,6 +45,7 @@ export async function makeFixture(): Promise<Fixture> {
     home,
     lockPath,
     readLock: (scope) => readLock(scope === "user" ? lockPath : join(scope, "skills-lock.json")),
+    readLockStrict: (scope) => readLockStrict(scope === "user" ? lockPath : join(scope, "skills-lock.json")),
     async skill(dir, name) {
       const path = join(home, dir, name)
       await mkdir(path, { recursive: true })
@@ -93,7 +95,12 @@ console.log(JSON.stringify(out));`
   for (const [id, { detected, ...rest }] of Object.entries(raw))
     agents[id] = { ...rest, detectInstalled: async () => detected }
   const mod = (await import(config.skillsAgentsModule)) as CliNameFns
-  return { agents, sanitizeName: mod.sanitizeName, resolveSkillsToRemove: mod.resolveSkillsToRemove }
+  return {
+    agents,
+    sanitizeName: mod.sanitizeName,
+    resolveSkillsToRemove: mod.resolveSkillsToRemove,
+    computeSkillFolderHash: mod.computeSkillFolderHash,
+  }
 }
 
 function cleanEnv(): Record<string, string> {
@@ -174,7 +181,8 @@ export interface Wired {
   actions: SkillActions
   guard: RemovalGuard
   calls: string[][]
-  upstream: { state: UpstreamState | Error; asked: string[] }
+  /** onAsk runs inside the job's fresh upstream recheck (to change the disk mid-job) */
+  upstream: { state: UpstreamState | Error; asked: string[]; onAsk?: () => Promise<void> | void }
   run(body: unknown): Promise<Response>
   status(): Promise<import("../../shared/api.ts").UpdateStatus>
 }
@@ -193,9 +201,11 @@ export async function wire(
     home: fx.home,
     loadCli: fx.loadCli,
     readLock: fx.readLock,
+    readLockStrict: fx.readLockStrict,
     records: updates,
     upstream: async (_scope: ScopeKey, name: string) => {
       upstream.asked.push(name)
+      await upstream.onAsk?.()
       if (upstream.state instanceof Error) throw upstream.state
       return upstream.state
     },
@@ -244,11 +254,19 @@ export async function settle(jobs: JobManager) {
   await Bun.sleep(5)
 }
 
-/** The willDelete lists from GET /updates, as UpdateRunRequest.removePlans. */
-export async function shownPlans(w: Wired, names: string[]) {
+/**
+ * What a dialog would send from GET /updates, as UpdateRunRequest.removePlans: the willDelete
+ * lists, every copy shown with its identical flag, and `tick` (per name: copy paths ticked).
+ */
+export async function shownPlans(w: Wired, names: string[], tick: Record<string, string[]> = {}) {
   const status = await w.status()
-  return names.map((name) => ({
-    name,
-    willDelete: status.removalPlans?.find((p) => p.name === name)?.willDelete ?? [],
-  }))
+  return names.map((name) => {
+    const plan = status.removalPlans?.find((p) => p.name === name)
+    return {
+      name,
+      willDelete: plan?.willDelete ?? [],
+      copies: tick[name] ?? [],
+      shownCopies: (plan?.copies ?? []).map((c) => ({ path: c.path, identical: c.identical })),
+    }
+  })
 }

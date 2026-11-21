@@ -87,6 +87,10 @@ export function UpdateDialogBody({ children, className }: { children: ReactNode;
   )
 }
 
+/** For a footer's confirm button: a long label ("Remove 6 skills · 6 copies") wraps on phones. */
+export const CONFIRM_WRAP =
+  "max-md:h-auto max-md:min-h-9 max-md:min-w-0 max-md:py-1.5 max-md:text-center max-md:leading-tight max-md:whitespace-normal"
+
 export function UpdateDialogFooter({ children }: { children: ReactNode }) {
   return (
     <DialogFooter

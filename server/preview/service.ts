@@ -10,7 +10,13 @@ import type { IndexedSkill } from "../discovery/skill-index.ts"
 import { HttpError, badRequest } from "../lib/errors.ts"
 import { isInside } from "../lib/files.ts"
 import { parseFrontmatter, stringField } from "../lib/frontmatter.ts"
-import { fetchDownload, fetchWellKnown, safeSourceFile } from "./cli-sources.ts"
+import {
+  fetchDownload,
+  fetchWellKnown,
+  safeSourceFile,
+  wellKnownIndexNames,
+  type FetchLike,
+} from "./cli-sources.ts"
 import { MAX_DIFF_BYTES, diffFolders } from "./folder-diff.ts"
 import { GitSource, type GitSourceOptions, type Limiter } from "./git-source.ts"
 import { openRegularFile, previewTooLarge, readPrefix } from "./limits.ts"
@@ -32,6 +38,8 @@ import {
 export interface PreviewOptions extends SourceCacheOptions {
   /** disk quota per fetched Git source */
   maxSourceBytes?: number
+  /** test seam: fetch for the strict well-known index check */
+  indexFetch?: FetchLike
 }
 
 /**
@@ -44,7 +52,7 @@ export class UpdatePreviewService {
   private readonly used = new Map<string, string>()
 
   constructor(
-    options: PreviewOptions,
+    private readonly options: PreviewOptions,
     fetcher?: Fetcher,
     token: string | null = null
   ) {
@@ -101,6 +109,7 @@ export class UpdatePreviewService {
     entry: LockEntry
   ): Promise<UpstreamState> {
     const plan = planUpdate(entry, lockName, scope === "user")
+    if (plan.spec.kind === "well-known") return this.wellKnownState(plan.spec.url, plan.sourceName)
     const lease = await this.cache.acquire(plan.spec, { fresh: true })
     try {
       await findSkill(lease.checkout, plan)
@@ -113,6 +122,24 @@ export class UpdatePreviewService {
     } finally {
       lease.release()
     }
+  }
+
+  /**
+   * A well-known skill is gone only when every index the CLI would read was fetched and none
+   * lists it (wellKnownIndexNames). The CLI's own fetch hides network errors and failed
+   * artifact downloads, which would make a skill that is still there look deleted.
+   */
+  private async wellKnownState(url: string, sourceName: string): Promise<UpstreamState> {
+    const wanted = normalizeName(sourceName)
+    const indexes = await this.cache.limit(() =>
+      wellKnownIndexNames(url, AbortSignal.timeout(this.options.timeoutMs), this.options.indexFetch)
+    )
+    for (const names of indexes) {
+      const matches = names.filter((name) => normalizeName(name) === wanted)
+      if (matches.length > 1) return "ambiguous"
+      if (matches.length === 1) return "present"
+    }
+    return "deleted"
   }
 
   /** After an update job: drop the sources those skills were previewed from. */

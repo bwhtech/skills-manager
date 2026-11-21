@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import type {
   JobRef,
+  RemovalPlan,
   SaveRequest,
   SaveResponse,
   SkillDetail,
@@ -14,9 +15,10 @@ import {
   readSkillFile,
   readSkillMd,
 } from "../discovery/skill-files.ts"
-import { forbidden, HttpError, notFound, readJson } from "../lib/errors.ts"
+import { badRequest, forbidden, HttpError, notFound, readJson } from "../lib/errors.ts"
 import { saveTextFile } from "../lib/files.ts"
 import { decodePathId, requireScope } from "../lib/validate.ts"
+import { requireShownPlan, toPublic } from "../removal/guard.ts"
 import type { Services } from "../services.ts"
 
 export function skillRoutes(svc: Services): Hono {
@@ -93,18 +95,47 @@ export function skillRoutes(svc: Services): Hono {
     return c.json(body)
   })
 
+  app.get("/skills/:id/removal-plan", async (c) => {
+    const skill = await lookup(c.req.param("id"))
+    if (skill.origin !== "npx")
+      throw badRequest("Removal plans are only for skills installed with the skills CLI")
+    const [plan] = await svc.removals.plans(skill.scope, [skill.cliName], { intent: "remove" })
+    const body: RemovalPlan = toPublic(plan)
+    return c.json(body)
+  })
+
   app.delete("/skills/:id", async (c) => {
     const skill = await lookup(c.req.param("id"))
+    // Optional body (RemoveSkillRequest): what the Remove dialog showed and ticked.
+    const raw = await c.req.text()
+    const shown = raw.trim() ? requireShownPlan(parseBody(raw)) : undefined
     const plan =
       skill.origin === "npx"
-        ? (await svc.removals.plans(skill.scope, [skill.cliName]))[0]
+        ? (
+            await svc.removals.plans(skill.scope, [skill.cliName], {
+              intent: "remove",
+              gone: new Map([[skill.cliName, shown?.copies ?? []]]),
+            })
+          )[0]
         : undefined
-    const job = svc.actions.remove(skill, plan)
+    if (skill.origin !== "npx" && shown?.copies?.length)
+      throw badRequest("Separate copies can be ticked only for skills installed with the skills CLI")
+    const job = svc.actions.remove(skill, plan, shown)
     const body: JobRef = { jobId: job.id }
     return c.json(body, 202)
   })
 
   return app
+}
+
+function parseBody(raw: string): unknown {
+  try {
+    const body = JSON.parse(raw)
+    if (body && typeof body === "object") return body
+  } catch {
+    // fall through
+  }
+  throw badRequest("Body must be a JSON object")
 }
 
 export function toSummary(skill: IndexedSkill, svc: Pick<Services, "updates">): SkillSummary {

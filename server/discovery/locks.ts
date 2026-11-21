@@ -21,6 +21,8 @@ export interface LockEntry {
   computedHash?: string
   /** commit the skill was installed from, when known */
   commit?: string
+  /** "copy" or "symlink": how the CLI installed the skill (newer CLI versions record it) */
+  installMode?: string
   installedAt?: string
   updatedAt?: string
 }
@@ -77,17 +79,55 @@ export function toSkillSource(entry: LockEntry): SkillSource {
   return out
 }
 
+type RawLock = {
+  skills?: Record<string, Partial<LockEntry>>
+  lastSelectedAgents?: unknown
+}
+
+/** A missing, unreadable or malformed lock reads as empty. For display and planning. */
 export async function readLock(path: string): Promise<SkillLock> {
-  const lock: SkillLock = { skills: new Map(), lastSelectedAgents: [] }
-  let raw: {
-    skills?: Record<string, Partial<LockEntry>>
-    lastSelectedAgents?: unknown
-  }
+  let raw: RawLock
   try {
     raw = JSON.parse(await readFile(path, "utf8"))
   } catch {
-    return lock
+    return { skills: new Map(), lastSelectedAgents: [] }
   }
+  return parseLock(raw)
+}
+
+/**
+ * For verification after `skills remove`, which always writes the lock back: throws when the
+ * file is missing, unreadable, not JSON, or has no `skills` object. A valid lock with no
+ * entries is a valid empty result.
+ */
+export async function readLockStrict(path: string): Promise<SkillLock> {
+  let text: string
+  try {
+    text = await readFile(path, "utf8")
+  } catch (err) {
+    throw new Error(`could not read the lock file ${path}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`, {
+      cause: err,
+    })
+  }
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch (err) {
+    throw new Error(`the lock file ${path} is not valid JSON`, { cause: err })
+  }
+  const skills = (raw as RawLock | null)?.skills
+  if (!raw || typeof raw !== "object" || !skills || typeof skills !== "object" || Array.isArray(skills))
+    throw new Error(`the lock file ${path} has no skills object`)
+  return parseLock(raw as RawLock)
+}
+
+/** readLockStrict for a scope: the global lock for "user", else the project's lock. */
+export const readScopeLockStrict: LockReader = (scope) =>
+  readLockStrict(scope === "user" ? config.globalLock : join(scope, projectLockName))
+
+function parseLock(raw: RawLock): SkillLock {
+  const lock: SkillLock = { skills: new Map(), lastSelectedAgents: [] }
+  if (!raw || typeof raw !== "object") return lock
   for (const [name, entry] of Object.entries(raw.skills ?? {})) {
     if (!entry || typeof entry.source !== "string") continue
     lock.skills.set(name, {
@@ -102,6 +142,7 @@ export async function readLock(path: string): Promise<SkillLock> {
       wellKnownDigest: str(entry.wellKnownDigest),
       computedHash: str(entry.computedHash),
       commit: str(entry.commit),
+      installMode: str(entry.installMode),
       installedAt: str(entry.installedAt),
       updatedAt: str(entry.updatedAt),
     })
