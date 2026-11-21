@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { InstallDialog } from "@/features/install/install-dialog"
 import { InstructionsView } from "@/features/instructions/instructions-view"
 import { JobsSheet } from "@/features/jobs/jobs-sheet"
+import { FileViewer } from "@/features/open/file-viewer"
 import { RecoveryBanner } from "@/features/recovery/recovery-banner"
 import { AppSidebar } from "@/features/scopes/app-sidebar"
 import { SkillsView } from "@/features/skills/skills-view"
@@ -115,6 +116,7 @@ export function App() {
           </SidebarInset>
         </SidebarProvider>
         <JobsSheet />
+        <FileViewer />
         <InstallDialog />
         <UpdateAllDialogSlot />
         <UnsavedChangesDialog />

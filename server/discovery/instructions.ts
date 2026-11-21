@@ -78,6 +78,20 @@ export class InstructionService {
     return file
   }
 
+  /**
+   * The known file whose content lives at a real path: a regular file first, else a link to it
+   * (the UI opens a link's target). Null when no known file is there.
+   */
+  async findByRealPath(real: string): Promise<InstructionFile | null> {
+    const files = (await this.all()).filter((f) => f.exists)
+    const reals = await Promise.all(files.map((f) => f.linkTarget ?? realpathOrNull(f.path)))
+    return (
+      files.find((f, i) => !f.linkTarget && reals[i] === real) ??
+      files.find((_, i) => reals[i] === real) ??
+      null
+    )
+  }
+
   /** Cheap: no link matching across scopes. */
   async countExisting(scope: ScopeKey): Promise<number> {
     const entries = await Promise.all(

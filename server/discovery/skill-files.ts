@@ -7,7 +7,8 @@ import { MAX_TEXT_BYTES, isInside, readTextFile } from "../lib/files.ts"
 import { requireRelativePath } from "../lib/validate.ts"
 
 const MAX_ENTRIES = 500
-const SKIP_DIRS = new Set([".git", "node_modules"])
+/** Folders a skill file tree skips. */
+export const SKIP_DIRS = new Set([".git", "node_modules"])
 const TEXT_EXT = new Set([
   ".md",
   ".mdx",
@@ -172,11 +173,12 @@ async function isTextFile(path: string, size: number): Promise<boolean> {
   return !(await hasNulByte(path))
 }
 
-async function hasNulByte(path: string): Promise<boolean> {
+/** True when the first `bytes` bytes hold a NUL byte (or the file cannot be opened). */
+export async function hasNulByte(path: string, bytes = 4096): Promise<boolean> {
   const handle = await open(path, "r").catch(() => null)
   if (!handle) return true
   try {
-    const buf = Buffer.alloc(4096)
+    const buf = Buffer.alloc(bytes)
     const { bytesRead } = await handle.read(buf, 0, buf.length, 0)
     return buf.subarray(0, bytesRead).includes(0)
   } finally {

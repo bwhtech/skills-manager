@@ -15,6 +15,7 @@ import {
   type InstructionFile,
   type LinkInstructionRequest,
   type LinkInstructionResponse,
+  type OpenResult,
   type Job,
   type JobRef,
   type RecoveryRequest,
@@ -154,6 +155,9 @@ export const api = {
   restoreCopies: (body: RecoveryRequest) => request<RecoveryResult>("POST", "/api/recovery/restore", body),
   deleteCopies: (body: RecoveryRequest) => request<RecoveryResult>("POST", "/api/recovery/delete", body),
 
+  open: (path: string, from: string) => request<OpenResult>("GET", `/api/open?${q({ path, from })}`),
+  file: (path: string) => request<FileContent>("GET", `/api/file?${q({ path })}`),
+
   jobs: () => request<Job[]>("GET", "/api/jobs"),
   job: (id: string) => request<Job>("GET", `/api/jobs/${id}`),
   jobEventsUrl: (id: string) => `/api/jobs/${id}/events`,
@@ -172,6 +176,7 @@ export const keys = {
   updatePreviews: ["update-preview"] as const,
   updatePreview: (id: string) => ["update-preview", id] as const,
   search: (text: string) => ["search", text] as const,
+  file: (path: string) => ["file", path] as const,
   jobs: ["jobs"] as const,
   recovery: ["recovery"] as const,
 }
@@ -218,6 +223,17 @@ export function useInstruction(id: string | null, exists: boolean) {
     queryKey: keys.instruction(id ?? ""),
     queryFn: () => api.instruction(id!),
     enabled: !!id && exists,
+  })
+}
+
+/** A plain file a document links to (read-only viewer). */
+export function useFile(path: string | null) {
+  return useQuery({
+    queryKey: keys.file(path ?? ""),
+    queryFn: () => api.file(path!),
+    enabled: !!path,
+    staleTime: 0,
+    retry: false,
   })
 }
 

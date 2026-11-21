@@ -2,7 +2,14 @@ import { useSyncExternalStore } from "react"
 import type { ScopeKey } from "@shared/api"
 
 // App-wide UI state that several unrelated components open or read:
-// the jobs drawer, the install dialog and the Update all dialog.
+// the jobs drawer, the install dialog, the Update all dialog and the file viewer.
+
+/** A plain file a document linked to, shown read-only. */
+export interface ViewedFile {
+  /** absolute real path */
+  path: string
+  line?: number
+}
 
 interface UiState {
   jobsOpen: boolean
@@ -10,9 +17,16 @@ interface UiState {
   installOpen: boolean
   /** the scope whose Update all dialog is open */
   updateAllScope: ScopeKey | null
+  viewedFile: ViewedFile | null
 }
 
-let state: UiState = { jobsOpen: false, selectedJobId: null, installOpen: false, updateAllScope: null }
+let state: UiState = {
+  jobsOpen: false,
+  selectedJobId: null,
+  installOpen: false,
+  updateAllScope: null,
+  viewedFile: null,
+}
 const listeners = new Set<() => void>()
 
 function set(patch: Partial<UiState>) {
@@ -37,4 +51,6 @@ export const ui = {
   setInstallOpen: (open: boolean) => set({ installOpen: open }),
   openUpdateAll: (scope: ScopeKey) => set({ updateAllScope: scope }),
   closeUpdateAll: () => set({ updateAllScope: null }),
+  viewFile: (file: ViewedFile) => set({ viewedFile: file }),
+  closeFile: () => set({ viewedFile: null }),
 }

@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { handleError } from "./lib/errors.ts"
 import { mutationGuard } from "./lib/security.ts"
 import { agentRoutes } from "./routes/agents.ts"
+import { fileRoutes } from "./routes/files.ts"
 import { installRoutes } from "./routes/install.ts"
 import { instructionRoutes } from "./routes/instructions.ts"
 import { jobRoutes } from "./routes/jobs.ts"
@@ -26,6 +27,7 @@ export function createApi(svc: Services): Hono {
     installRoutes,
     jobRoutes,
     recoveryRoutes,
+    fileRoutes,
   ]) {
     api.route("/", routes(svc))
   }

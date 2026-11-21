@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
+import { useCallback, useDeferredValue, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { toast } from "sonner"
 import type { FileContent, SaveResponse } from "@shared/api"
 import { errorMessage, isConflict } from "@/lib/api"
@@ -17,7 +17,10 @@ import {
   setDraftConflict,
   subscribeDrafts,
 } from "@/lib/drafts"
+import type { LinkTarget } from "@/lib/path-links"
+import { takePendingLine } from "@/lib/pending-line"
 import { cn } from "@/lib/utils"
+import { openLink } from "@/features/open/open-path"
 import { CodeEditor } from "./code-editor"
 import { ConflictDialog } from "./conflict-dialog"
 import { ValidationBanner, WarningLine } from "./editor-banners"
@@ -54,6 +57,8 @@ export interface DocumentEditorProps {
   /** load the file from disk again */
   onReload: () => Promise<FileContent | undefined>
   onDirtyChange?: (dirty: boolean) => void
+  /** this document's docAddress (features/open): paths in it open on Cmd/Ctrl+click */
+  openFrom?: string
 }
 
 /**
@@ -75,6 +80,14 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   const markdown = isMarkdownPath(path)
   const viewMode = !markdown ? "edit" : mode === "split" && !isDesktop ? "edit" : mode
   const preview = useDeferredValue(draft)
+  const { openFrom } = props
+  const [initialLine] = useState(() => (openFrom ? takePendingLine(openFrom) : undefined))
+  const onOpenLink = useCallback(
+    (link: LinkTarget) => {
+      if (openFrom) openLink(link, openFrom)
+    },
+    [openFrom]
+  )
 
   useEffect(
     () => retainDraft(draftKey, file),
@@ -161,6 +174,8 @@ export default function DocumentEditor(props: DocumentEditorProps) {
           path={path}
           ariaLabel={`${title} editor`}
           className={viewMode === "preview" ? "hidden" : undefined}
+          onOpenLink={openFrom ? onOpenLink : undefined}
+          initialLine={initialLine}
         />
         {viewMode !== "edit" && (
           <div
@@ -168,7 +183,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
             tabIndex={0}
             aria-label={`${title} preview`}
           >
-            <MarkdownPreview text={preview} />
+            <MarkdownPreview text={preview} onOpenLink={openFrom ? onOpenLink : undefined} />
           </div>
         )}
       </div>

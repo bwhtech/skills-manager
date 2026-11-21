@@ -5,6 +5,7 @@ import { DocumentEditor, type SaveOptions } from "@/components/editor"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
 import { HttpError, api, errorMessage, keys, useInstruction, useScopes } from "@/lib/api"
 import { tildify } from "@/lib/format"
+import { docAddress } from "@/features/open/open-path"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { alsoReadAs } from "./link-labels"
 
@@ -59,6 +60,7 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
         onSaved={() => void client.invalidateQueries({ queryKey: keys.instruction(file.id) })}
         onReload={async () => (await content.refetch()).data}
         onDirtyChange={onDirtyChange}
+        openFrom={docAddress.instruction(file.id)}
       />
     </Suspense>
   )

@@ -709,6 +709,30 @@ export interface UpdateTarget {
 //   event "done": data = Job (JSON), then the stream closes
 //   On connect the server first replays the existing log lines.
 
+// ---------- Open a path ----------
+
+/**
+ * Where a path written in a document leads. `line` is set when the path ended in `:<line>`.
+ * skill-file: a file inside a discovered skill folder (file is relative to its realPath);
+ *   scope is the owning scope, scopes every scope it is listed in.
+ * instruction: a discovered instruction file (a link to one is found by its target too).
+ * file: any other regular text file under HOME or /mnt/data; path is absolute, as resolved
+ *   from the written path (symlinks not followed, for display); /api/file checks its real path.
+ */
+export type OpenResult =
+  | { kind: "skill-file"; skillId: string; file: string; scope: ScopeKey; scopes: ScopeKey[]; line?: number }
+  | { kind: "instruction"; id: string; scope: ScopeKey; line?: number }
+  | { kind: "file"; path: string; line?: number }
+
+// GET /api/open?path=<raw>&from=<from>  -> OpenResult
+//   raw: as written, e.g. "~/setup.md", "references/api.md", "src/app.ts:42".
+//   "~" is HOME. A relative path resolves against the folder of the document in `from`:
+//   an instruction file id, "<skillId>:<file in the skill>", or an absolute file path
+//   (a file the viewer shows). Without `from`, relative paths are 400.
+//   404 (missing, a directory, outside HOME and /mnt/data), 403 (a secret-looking path:
+//   "Not shown: looks like a secret file"), 415 (binary), 413 (over 1 MB). The real path counts.
+// GET /api/file?path=<abs>  -> FileContent  (read-only; the same checks as /api/open)
+
 // ---------- Helpers ----------
 
 export function encodeId(path: string): string {

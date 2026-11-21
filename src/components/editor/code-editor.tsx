@@ -11,10 +11,12 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view"
+import type { LinkTarget } from "@/lib/path-links"
 import { cn } from "@/lib/utils"
 import { editorTheme } from "./editor-theme"
 import { highlighting } from "./highlight"
 import { languageForPath } from "./languages"
+import { linkClicks } from "./link-clicks"
 
 interface CodeEditorProps {
   value: string
@@ -24,6 +26,10 @@ interface CodeEditorProps {
   path: string
   ariaLabel: string
   className?: string
+  /** Cmd/Ctrl+click on a path or URL in the text */
+  onOpenLink?: (link: LinkTarget) => void
+  /** 1-based line to put the cursor on and scroll to when the view is created */
+  initialLine?: number
 }
 
 export function CodeEditor({
@@ -33,14 +39,18 @@ export function CodeEditor({
   path,
   ariaLabel,
   className,
+  onOpenLink,
+  initialLine,
 }: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
   const compartments = useRef({ language: new Compartment(), readOnly: new Compartment() })
   const onChangeRef = useRef(onChange)
+  const onOpenLinkRef = useRef(onOpenLink)
 
   useEffect(() => {
     onChangeRef.current = onChange
+    onOpenLinkRef.current = onOpenLink
   })
 
   // Create the view once. Later prop changes go through the effects below.
@@ -67,6 +77,7 @@ export function CodeEditor({
           highlighting,
           language.of([]),
           readOnlyCompartment.of(readOnlyExtensions(readOnly)),
+          linkClicks(() => onOpenLinkRef.current),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) onChangeRef.current?.(update.state.doc.toString())
           }),
@@ -74,6 +85,13 @@ export function CodeEditor({
       }),
     })
     view.current = editor
+    if (initialLine && initialLine <= editor.state.doc.lines) {
+      const at = editor.state.doc.line(initialLine).from
+      editor.dispatch({
+        selection: { anchor: at },
+        effects: EditorView.scrollIntoView(at, { y: "center" }),
+      })
+    }
     return () => {
       editor.destroy()
       view.current = null

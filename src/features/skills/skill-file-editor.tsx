@@ -7,6 +7,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/u
 import { Skeleton } from "@/components/ui/skeleton"
 import { api, errorMessage, keys, resetUpdatePreviews, useSkillFile } from "@/lib/api"
 import { basename } from "@/lib/format"
+import { docAddress } from "@/features/open/open-path"
 import { OVERWRITE_WARNING } from "@/features/updates/copy"
 import { skillReadOnlyReason } from "./read-only-reason"
 
@@ -74,6 +75,7 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
       onSaved={saved}
       onReload={reload}
       onDirtyChange={onDirtyChange}
+      openFrom={docAddress.skillFile(skill.id, SKILL_MD)}
     />
   )
 }
@@ -100,6 +102,7 @@ function OtherFileViewer({ skill, path }: { skill: SkillDetail; path: string }) 
       file={file.data}
       readOnlyReason="Only SKILL.md is editable. Other files in the skill folder are read-only."
       onReload={async () => (await file.refetch()).data}
+      openFrom={docAddress.skillFile(skill.id, path)}
     />
   )
 }
