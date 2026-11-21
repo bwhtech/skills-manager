@@ -1,6 +1,7 @@
 import { Hono } from "hono"
+import { config } from "./config.ts"
 import { handleError } from "./lib/errors.ts"
-import { mutationGuard } from "./lib/security.ts"
+import { hostGuard, mutationGuard } from "./lib/security.ts"
 import { agentRoutes } from "./routes/agents.ts"
 import { fileRoutes } from "./routes/files.ts"
 import { installRoutes } from "./routes/install.ts"
@@ -15,6 +16,7 @@ import type { Services } from "./services.ts"
 /** The /api app. */
 export function createApi(svc: Services): Hono {
   const api = new Hono()
+  api.use("*", hostGuard(config.allowedHosts))
   api.use("*", mutationGuard)
   api.onError(handleError)
   api.get("/health", (c) => c.json({ ok: true }))

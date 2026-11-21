@@ -44,6 +44,11 @@ function passwdHome(): string | null {
 export const config = {
   port: Number(process.env.PORT ?? 3530),
   host: process.env.HOST ?? "127.0.0.1",
+  /**
+   * Host names the API answers to, besides localhost, 127.0.0.1 and [::1] (any port).
+   * Env SKILLS_MANAGER_ALLOWED_HOSTS (comma-separated) replaces the default tailnet name.
+   */
+  allowedHosts: parseList(process.env.SKILLS_MANAGER_ALLOWED_HOSTS) ?? ["hussain-coding.tail5c9b7d.ts.net"],
   home,
   root,
   skillsBin: process.env.SKILLS_BIN ?? join(root, "node_modules/.bin/skills"),
@@ -69,6 +74,12 @@ export const config = {
   previewTtlMs: 10 * 60_000,
   previewFetchTimeoutMs: 60_000,
   previewMaxFetches: 3,
+}
+
+/** A comma-separated env value as a list, or undefined when unset or empty. */
+function parseList(value: string | undefined): string[] | undefined {
+  const items = value?.split(",").map((s) => s.trim()).filter(Boolean)
+  return items?.length ? items : undefined
 }
 
 export const projectLockName = "skills-lock.json"

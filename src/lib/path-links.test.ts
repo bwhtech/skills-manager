@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { classifyHref, findLinks, isPathLike } from "./path-links"
+import { MAX_SCAN_LINE, classifyHref, findLinks, isPathLike, scanLine } from "./path-links"
 
 const targets = (line: string) => findLinks(line).map((m) => `${m.kind}:${m.target}`)
 
@@ -32,6 +32,33 @@ describe("findLinks", () => {
   test("a path inside a link is found once", () => {
     expect(targets("[`~/a.md`](~/a.md)")).toEqual(["path:~/a.md", "path:~/a.md"])
     expect(findLinks("[x](~/a.md) ~/a.md")).toHaveLength(2)
+  })
+})
+
+describe("long lines", () => {
+  test("a line with 5,000 paths is processed in linear time", () => {
+    const line = Array.from({ length: 5000 }, (_, i) => `~/d/f${i}.md \`p${i}.ts\``).join(" ")
+    findLinks(line) // warm up the regexes
+    const start = performance.now()
+    const found = findLinks(line)
+    const elapsed = performance.now() - start
+    expect(found).toHaveLength(10_000)
+    expect(elapsed).toBeLessThan(50)
+  })
+
+  test("overlapping matches: the first to start wins, then the earlier kind", () => {
+    // The link target and the bare path start at the same offset.
+    expect(findLinks("(see [x](~/a.md))").map((m) => [m.from, m.to])).toEqual([[9, 15]])
+    expect(targets("`~/a.md` ~/a.md [y](./b.md)")).toEqual(["path:~/a.md", "path:~/a.md", "path:./b.md"])
+  })
+
+  test("the editor skips lines over 10,000 characters", () => {
+    const long = "~/setup.md ".padEnd(20_000, "x")
+    expect(long).toHaveLength(20_000)
+    expect(findLinks(long).length).toBeGreaterThan(0)
+    expect(scanLine(long)).toEqual([])
+    const edge = "~/setup.md ".padEnd(MAX_SCAN_LINE, "x")
+    expect(scanLine(edge).map((m) => m.target)).toEqual(["~/setup.md"])
   })
 })
 

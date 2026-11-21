@@ -70,3 +70,11 @@ to install, update and remove skills.
 - Never write outside paths the server discovered itself (skill `SKILL.md` files of editable
   skills, and known instruction file paths).
 - Mutating requests need header `X-Skills-Manager: 1` and a same-origin `Origin`.
+- Every `/api` request must name an allowed host, against DNS rebinding (403 `bad_host`).
+  `localhost`, `127.0.0.1` and `[::1]` are always allowed, on any port. The other allowed host
+  names come from env `SKILLS_MANAGER_ALLOWED_HOSTS` (comma-separated host names, no ports).
+  Default: `hussain-coding.tail5c9b7d.ts.net`. Set the env var to replace the default.
+  The server checks `Host`, and also `X-Forwarded-Host` when the TCP peer is loopback
+  (Tailscale Serve connects from 127.0.0.1, keeps `Host` and sets `X-Forwarded-Host` to the
+  same name). It ignores `X-Forwarded-Host` from other peers.
+- `/api` requests with `Sec-Fetch-Site: cross-site` get 403.

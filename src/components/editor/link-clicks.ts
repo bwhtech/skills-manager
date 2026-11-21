@@ -1,6 +1,6 @@
 import { RangeSetBuilder, StateEffect, type Extension } from "@codemirror/state"
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view"
-import { findLinks, type LinkTarget } from "@/lib/path-links"
+import { scanLine, type LinkTarget } from "@/lib/path-links"
 
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform)
 export const MOD_CLICK_LABEL = IS_MAC ? "⌘-click to open" : "Ctrl-click to open"
@@ -18,7 +18,7 @@ function buildMarks(view: EditorView): DecorationSet {
     for (let pos = from; pos <= to; ) {
       const line = view.state.doc.lineAt(pos)
       if (line.number > lastLine) {
-        for (const link of findLinks(line.text)) builder.add(line.from + link.from, line.from + link.to, linkMark)
+        for (const link of scanLine(line.text)) builder.add(line.from + link.from, line.from + link.to, linkMark)
         lastLine = line.number
       }
       pos = line.to + 1
@@ -81,7 +81,7 @@ export function linkClicks(getOpen: () => ((link: LinkTarget) => void) | null | 
       if (pos === null) return false
       const line = view.state.doc.lineAt(pos)
       const offset = pos - line.from
-      const link = findLinks(line.text).find((m) => m.from <= offset && offset <= m.to)
+      const link = scanLine(line.text).find((m) => m.from <= offset && offset <= m.to)
       if (!link) return false
       // Not a cursor move or an added selection range.
       event.preventDefault()

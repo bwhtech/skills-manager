@@ -18,7 +18,6 @@ import {
   subscribeDrafts,
 } from "@/lib/drafts"
 import type { LinkTarget } from "@/lib/path-links"
-import { takePendingLine } from "@/lib/pending-line"
 import { cn } from "@/lib/utils"
 import { openLink } from "@/features/open/open-path"
 import { CodeEditor } from "./code-editor"
@@ -81,7 +80,6 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   const viewMode = !markdown ? "edit" : mode === "split" && !isDesktop ? "edit" : mode
   const preview = useDeferredValue(draft)
   const { openFrom } = props
-  const [initialLine] = useState(() => (openFrom ? takePendingLine(openFrom) : undefined))
   const onOpenLink = useCallback(
     (link: LinkTarget) => {
       if (openFrom) openLink(link, openFrom)
@@ -175,7 +173,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
           ariaLabel={`${title} editor`}
           className={viewMode === "preview" ? "hidden" : undefined}
           onOpenLink={openFrom ? onOpenLink : undefined}
-          initialLine={initialLine}
+          lineKey={openFrom}
         />
         {viewMode !== "edit" && (
           <div

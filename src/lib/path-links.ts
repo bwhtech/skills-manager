@@ -60,28 +60,57 @@ export function classifyHref(href: string): LinkTarget | null {
   return isPathLike(href) ? { kind: "path", target: safeDecode(href) } : null
 }
 
-/** Paths and URLs in one line of Markdown, sorted, not overlapping. */
+/** Longer lines are not scanned for links (minified JSON, base64): see scanLine. */
+export const MAX_SCAN_LINE = 10_000
+
+/** findLinks for the editor: nothing on a line over MAX_SCAN_LINE characters. */
+export function scanLine(line: string): LinkMatch[] {
+  return line.length > MAX_SCAN_LINE ? [] : findLinks(line)
+}
+
+/**
+ * Paths and URLs in one line of Markdown, sorted, not overlapping. Where two
+ * overlap, the one that starts first wins; at the same start, the earlier kind
+ * (inline code, link target, bare URL, bare path).
+ */
 export function findLinks(line: string): LinkMatch[] {
-  const found: LinkMatch[] = []
-  const add = (from: number, text: string, target: LinkTarget | null) => {
-    const to = from + text.length
-    if (!target || found.some((m) => from < m.to && to > m.from)) return
-    found.push({ ...target, from, to })
+  const found: Ranked[] = []
+  const add = (rank: number, from: number, text: string, target: LinkTarget | null) => {
+    if (target) found.push({ match: { ...target, from, to: from + text.length }, rank })
   }
   for (const m of line.matchAll(INLINE_CODE)) {
     const text = m[2]
-    add(m.index + m[1].length, text, isPathLike(text) ? { kind: "path", target: text } : null)
+    add(0, m.index + m[1].length, text, isPathLike(text) ? { kind: "path", target: text } : null)
   }
-  for (const m of line.matchAll(LINK_TARGET)) add(m.index + 2, m[1], classifyHref(m[1]))
+  for (const m of line.matchAll(LINK_TARGET)) add(1, m.index + 2, m[1], classifyHref(m[1]))
   for (const m of line.matchAll(BARE_URL)) {
     const text = m[0].replace(TRAILING, "")
-    add(m.index, text, { kind: "url", target: text })
+    add(2, m.index, text, { kind: "url", target: text })
   }
   for (const m of line.matchAll(BARE_PATH)) {
     const text = m[0].replace(TRAILING, "")
-    add(m.index, text, isPathLike(text) ? { kind: "path", target: text } : null)
+    add(3, m.index, text, isPathLike(text) ? { kind: "path", target: text } : null)
   }
-  return found.sort((a, b) => a.from - b.from)
+  return dropOverlaps(found)
+}
+
+/** A match and its kind's rank (lower wins at the same start). */
+interface Ranked {
+  match: LinkMatch
+  rank: number
+}
+
+/** Sort by start (then rank) and keep each match that starts after the last kept one ends. */
+function dropOverlaps(found: Ranked[]): LinkMatch[] {
+  found.sort((a, b) => a.match.from - b.match.from || a.rank - b.rank)
+  const kept: LinkMatch[] = []
+  let end = -1
+  for (const { match } of found) {
+    if (match.from < end || match.to <= match.from) continue
+    kept.push(match)
+    end = match.to
+  }
+  return kept
 }
 
 function safeDecode(text: string) {

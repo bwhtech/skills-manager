@@ -8,6 +8,9 @@
 //   `X-Skills-Manager: 1`. The server rejects mutating requests without it
 //   (403) and rejects requests whose Origin header does not match the Host.
 //   This blocks CSRF from other sites, because the app can run commands.
+// - Every request must name an allowed host (Host, and X-Forwarded-Host from a
+//   loopback proxy), or it gets 403 `bad_host`. This blocks DNS rebinding.
+//   Requests with `Sec-Fetch-Site: cross-site` get 403 `forbidden`.
 // - IDs are base64url of an absolute real path (see encodeId/decodeId).
 //   The server must never trust an ID: it decodes it and checks that the path
 //   is one it discovered itself.

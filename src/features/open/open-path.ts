@@ -1,14 +1,14 @@
 import { toast } from "sonner"
-import type { OpenResult } from "@shared/api"
+import type { OpenResult, ScopeKey } from "@shared/api"
 import { HttpError, api, errorMessage } from "@/lib/api"
-import { getPlace, navigate } from "@/lib/hash-state"
+import { getPlace, navigate, type Place } from "@/lib/hash-state"
 import type { LinkTarget } from "@/lib/path-links"
-import { setPendingLine } from "@/lib/pending-line"
+import { hasLineEditor, requestLine } from "@/lib/pending-line"
 import { ui } from "@/lib/ui-store"
 
 /**
  * A document's address for GET /api/open `from` (relative paths start at its folder),
- * and the key of a line to jump to when its editor mounts.
+ * and the key of its editor's line requests (lib/pending-line).
  */
 export const docAddress = {
   skillFile: (skillId: string, file: string) => `${skillId}:${file}`,
@@ -38,14 +38,28 @@ async function openPath(raw: string, from: string) {
     return
   }
   ui.closeFile()
-  // Both moves go through the unsaved-changes guard in navigate().
-  if (result.kind === "skill-file") {
-    const current = getPlace().scope
-    const scope = result.scopes.includes(current) ? current : result.scope
-    setPendingLine(docAddress.skillFile(result.skillId, result.file), result.line)
-    navigate({ tab: "skills", scope, skill: result.skillId, file: result.file })
-  } else {
-    setPendingLine(docAddress.instruction(result.id), result.line)
-    navigate({ tab: "instructions", scope: result.scope, doc: result.id })
+  const { key, place } = destination(result)
+  // The document is open already (also SKILL.md at file=null): show the line, no move.
+  if (hasLineEditor(key)) return requestLine(key, result.line)
+  // The move goes through the unsaved-changes guard; the line is requested only once it is accepted.
+  navigate(place, { onAccept: () => requestLine(key, result.line) })
+}
+
+/** Where a skill file or instruction file opens: its line-request key and its place. */
+function destination(result: Exclude<OpenResult, { kind: "file" }>): { key: string; place: Partial<Place> } {
+  if (result.kind === "instruction")
+    return {
+      key: docAddress.instruction(result.id),
+      place: { tab: "instructions", scope: result.scope, doc: result.id },
+    }
+  return {
+    key: docAddress.skillFile(result.skillId, result.file),
+    place: { tab: "skills", scope: skillScope(result.scope, result.scopes), skill: result.skillId, file: result.file },
   }
+}
+
+/** Stay in the shown scope when the skill is listed there. */
+function skillScope(scope: ScopeKey, scopes: ScopeKey[]): ScopeKey {
+  const current = getPlace().scope
+  return scopes.includes(current) ? current : scope
 }

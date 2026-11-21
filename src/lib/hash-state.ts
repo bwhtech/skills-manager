@@ -180,16 +180,21 @@ else shownIdx = entryIdx()!
  * Move to another place. Asks first when the open editor has unsaved changes.
  * Each move is a new history entry, so Back and Forward walk through places;
  * `replace` changes the shown entry instead (keyboard steps through a list).
+ * `onAccept` runs right after the move, or at once when already there; never
+ * when the user keeps the unsaved changes.
  */
 export function navigate(
   patch: Partial<Place>,
-  options: { force?: boolean; replace?: boolean } = {}
+  options: { force?: boolean; replace?: boolean; onAccept?: () => void } = {}
 ) {
   const current = getPlace()
   const next = resolve(current, patch)
   const hash = serialize(next)
-  if (hash === committedHash) return
-  const go = () => movePlace(hash, options.replace ?? false)
+  if (hash === committedHash) return options.onAccept?.()
+  const go = () => {
+    movePlace(hash, options.replace ?? false)
+    options.onAccept?.()
+  }
   if (options.force || !leavesEditor(current, next)) go()
   else confirmLeave(go)
 }

@@ -12,6 +12,7 @@ import {
   lineNumbers,
 } from "@codemirror/view"
 import type { LinkTarget } from "@/lib/path-links"
+import { subscribeLineRequests, takePendingLine } from "@/lib/pending-line"
 import { cn } from "@/lib/utils"
 import { editorTheme } from "./editor-theme"
 import { highlighting } from "./highlight"
@@ -30,6 +31,8 @@ interface CodeEditorProps {
   onOpenLink?: (link: LinkTarget) => void
   /** 1-based line to put the cursor on and scroll to when the view is created */
   initialLine?: number
+  /** this document's key for line requests (lib/pending-line): taken on mount and while mounted */
+  lineKey?: string
 }
 
 export function CodeEditor({
@@ -41,6 +44,7 @@ export function CodeEditor({
   className,
   onOpenLink,
   initialLine,
+  lineKey,
 }: CodeEditorProps) {
   const host = useRef<HTMLDivElement>(null)
   const view = useRef<EditorView | null>(null)
@@ -85,19 +89,22 @@ export function CodeEditor({
       }),
     })
     view.current = editor
-    if (initialLine && initialLine <= editor.state.doc.lines) {
-      const at = editor.state.doc.line(initialLine).from
-      editor.dispatch({
-        selection: { anchor: at },
-        effects: EditorView.scrollIntoView(at, { y: "center" }),
-      })
-    }
+    showLine(editor, initialLine ?? (lineKey ? takePendingLine(lineKey) : undefined))
     return () => {
       editor.destroy()
       view.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- created once
   }, [])
+
+  // A line request for this document while it is open (a :line link to it).
+  useEffect(() => {
+    if (!lineKey) return
+    return subscribeLineRequests(lineKey, () => {
+      const line = takePendingLine(lineKey)
+      if (view.current) showLine(view.current, line)
+    })
+  }, [lineKey])
 
   useEffect(() => {
     let cancelled = false
@@ -129,6 +136,16 @@ export function CodeEditor({
   }, [value])
 
   return <div ref={host} className={cn("h-full min-h-0 overflow-hidden", className)} />
+}
+
+/** Put the cursor at the start of a 1-based line and scroll it to the middle. */
+function showLine(editor: EditorView, line: number | undefined) {
+  if (!line || line > editor.state.doc.lines) return
+  const at = editor.state.doc.line(line).from
+  editor.dispatch({
+    selection: { anchor: at },
+    effects: EditorView.scrollIntoView(at, { y: "center" }),
+  })
 }
 
 // Read-only keeps the content focusable, so text can still be selected and searched.
