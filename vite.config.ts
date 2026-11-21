@@ -9,6 +9,12 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(import.meta.dirname, "./src"),
+      "@shared": resolve(import.meta.dirname, "./shared"),
     },
+  },
+  server: {
+    port: 5530,
+    host: "127.0.0.1",
+    proxy: { "/api": "http://127.0.0.1:3530" },
   },
 })
