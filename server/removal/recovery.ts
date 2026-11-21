@@ -82,6 +82,9 @@ export class RemovalRecovery {
       const inv = await takeInventory(real, DELETE_LIMITS).catch(() => null)
       if (!inv || inv.dev !== item.dev || inv.ino !== item.ino || fullDigest(inv) !== item.full)
         return { ok: false, message: "Its contents changed since it was set aside; nothing was deleted." }
+      // Recorded before the delete (a failed write throws and nothing is deleted), so a
+      // crash part way is never offered as restorable.
+      await journal.set(item.staged, "purging")
       try {
         await rm(real, { recursive: true })
       } catch (err) {
@@ -134,13 +137,16 @@ export class RemovalRecovery {
     // Never moved (a crash right before the move), or moved away by hand: nothing set aside.
     if (!at) return null
     const base = { original: item.original, staged: item.staged }
-    if (item.status === "purge_failed")
+    if (item.status === "purge_failed" || item.status === "purging")
       return {
         ...base,
         status: "purge_failed",
         restorable: false,
         deletable: false,
-        reason: `partially deleted, still in trash: ${item.staged}. Delete it by hand.`,
+        reason:
+          item.status === "purging"
+            ? `its delete was interrupted, so it may be partly gone; still in trash: ${item.staged}. Delete it by hand.`
+            : `partially deleted, still in trash: ${item.staged}. Delete it by hand.`,
       }
     if (!(await checkTrashed(placementOf(item), item.staged, item, this.deps.home)))
       return {

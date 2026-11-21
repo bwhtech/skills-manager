@@ -118,6 +118,27 @@ describe("removal journal (review round 9, item 1)", () => {
     expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
   })
 
+  test("a crash in the middle of a delete ('purging' recorded): never restorable or deletable here", async () => {
+    const { fx, jobId, after, claude } = await crashAfterStage()
+    const file = join(journalDir(fx.home), `${jobId}.json`)
+    const raw = JSON.parse(await readFile(file, "utf8")) as { items: { original: string; staged: string; status: string }[] }
+    const item = raw.items.find((i) => i.original === claude)!
+    item.status = "purging"
+    // Part of the folder is already gone, as after a crash during rm.
+    await rm(join(item.staged, "SKILL.md"))
+    await writeFile(file, JSON.stringify(raw))
+
+    const [removal] = (await after.status()).interruptedRemovals
+    const view = removal.items.find((i) => i.original === claude)!
+    expect([view.status, view.restorable, view.deletable]).toEqual(["purge_failed", false, false])
+    expect(view.reason).toContain("interrupted")
+
+    const res = await after.restore(jobId, [item.staged])
+    expect(res.results[0].ok).toBe(false)
+    expect(await exists(claude)).toBe(false)
+    expect(await exists(item.staged)).toBe(true)
+  })
+
   test("restore one copy and delete the other; then the journal and the trash dirs are gone", async () => {
     const { fx, jobId, after, claude, other } = await crashAfterStage()
     const [removal] = (await after.status()).interruptedRemovals

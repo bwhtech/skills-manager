@@ -513,7 +513,8 @@ export interface InterruptedCopy {
   staged: string
   /**
    * staged: whole, as it was set aside (or about to be, when the job stopped right then).
-   * purge_failed: its delete threw part way, so what is left is incomplete: neither restorable
+   * purge_failed: its delete threw or was interrupted part way (a crash after "purging" was
+   * recorded), so what is left is incomplete: neither restorable
    * nor deletable here; delete it by hand.
    */
   status: "staged" | "purge_failed"

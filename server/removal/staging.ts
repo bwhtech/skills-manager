@@ -222,6 +222,13 @@ export async function purgeStaged(
     log(`Did not delete the separate copy ${staged.path}: its trash dir changed. It is at ${staged.trashed}.`)
     return "kept"
   }
+  // Record the delete before it starts: a crash part way must never leave a "staged" entry
+  // that recovery would move back. No journal record, no delete.
+  const unrecorded = await note(journal, staged.trashed, "purging")
+  if (unrecorded) {
+    log(`Did not delete the separate copy ${staged.path}: could not record it in the removal journal (${unrecorded}). It is at ${staged.trashed}.`)
+    return "kept"
+  }
   try {
     await rm(real, { recursive: true })
   } catch (err) {

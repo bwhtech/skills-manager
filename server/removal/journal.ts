@@ -6,9 +6,11 @@ import { atomicWrite } from "../lib/files.ts"
 /**
  * planned: about to be moved into its trash dir (it may or may not have moved: check the disk);
  * staged: in its trash dir; restored: moved back; deleted: gone for good;
+ * purging: a delete started. Written before the delete; if the server stops part way, what is
+ *   left may be incomplete, so it is treated like purge_failed and never moved back.
  * purge_failed: the delete threw part way, so what is left in the trash dir is incomplete.
  */
-export type JournalStatus = "planned" | "staged" | "restored" | "deleted" | "purge_failed"
+export type JournalStatus = "planned" | "staged" | "restored" | "deleted" | "purging" | "purge_failed"
 
 export interface JournalItem {
   /** where the copy was */
@@ -37,7 +39,7 @@ export function journalDir(home: string): string {
   return join(home, ".config/skills-manager/removals")
 }
 
-const OPEN: ReadonlySet<JournalStatus> = new Set(["planned", "staged", "purge_failed"])
+const OPEN: ReadonlySet<JournalStatus> = new Set(["planned", "staged", "purging", "purge_failed"])
 
 /** A copy the journal does not record as settled: it may still be in a trash dir. */
 export function isOpen(item: JournalItem): boolean {
@@ -166,7 +168,7 @@ async function readJournal(path: string): Promise<JournalFile | null> {
         typeof i.dev === "number" &&
         typeof i.ino === "number" &&
         typeof i.full === "string" &&
-        ["planned", "staged", "restored", "deleted", "purge_failed"].includes(i.status as string)
+        ["planned", "staged", "restored", "deleted", "purging", "purge_failed"].includes(i.status as string)
     )
     return { version: 1, jobId: raw.jobId, at: raw.at, items }
   } catch {

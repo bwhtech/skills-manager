@@ -23,8 +23,13 @@ export function testCrashAllowed(env: Record<string, string | undefined>, home: 
 function passwdHome(): string | null {
   const uid = process.getuid?.()
   if (uid === undefined) return null
-  const out = Bun.spawnSync(["getent", "passwd", String(uid)], { stdout: "pipe", stderr: "ignore" })
-  let line = out.exitCode === 0 ? out.stdout.toString().trim() : ""
+  let line = ""
+  try {
+    const out = Bun.spawnSync(["getent", "passwd", String(uid)], { stdout: "pipe", stderr: "ignore" })
+    line = out.exitCode === 0 ? out.stdout.toString().trim() : ""
+  } catch {
+    // No getent: fall through to /etc/passwd. If that fails too, the fixture-HOME gate stays off.
+  }
   if (!line) {
     try {
       line = readFileSync("/etc/passwd", "utf8").split("\n").find((l) => l.split(":")[2] === String(uid)) ?? ""
