@@ -388,8 +388,11 @@ export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<
     }
     const temp = scratchName(path, "tmp")
     const moving = scratchName(path, "moving")
+    // Cleanup removes the temp name only if this call created it ("wx" fails on EEXIST).
+    let created = false
     try {
       await writeFile(temp, bytes, { flag: "wx", mode: fileMode })
+      created = true
       await chmod(temp, fileMode)
       // Take the link away (atomic), check it is the link we probed, then
       // put the new file at the free name with link(2), which never replaces.
@@ -430,7 +433,7 @@ export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<
       // The old link (checked above) is only a pointer; a leftover scratch name loses nothing.
       await unlink(moving).catch(() => {})
     } finally {
-      await unlink(temp).catch(() => {})
+      if (created) await unlink(temp).catch(() => {})
     }
   })
 }
