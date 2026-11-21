@@ -198,6 +198,16 @@ export async function putBack(
   }
 }
 
+/*
+ * Accepted limit (owner's decision, 2026-11-21): the scratch names used here
+ * (.<name>.<random>.moving / .undo / .tmp) are removed by pathname after they
+ * were inspected. A same-user process that swaps one of them in the
+ * microseconds between the check and the unlink could have its file removed.
+ * Bun/Node offer no openat/unlinkat to close this. Every path that touches a
+ * user's real file backs it up first, never replaces anything it has not
+ * inspected, and reports where a displaced file is kept.
+ */
+
 export interface LinkIds {
   sourceId: string
   targetId: string
