@@ -58,10 +58,15 @@ export async function createServices(): Promise<Services> {
     updates,
     jobs,
     actions: new SkillActions(cli, jobs, {
-      afterUpdate: (scope, names, succeeded) => {
+      // Both run before the job manager's re-check below starts.
+      afterUpdate: (scope, names, succeeded, output) => {
         previews.invalidate(scope, names)
-        // Before the job manager's re-check below starts.
+        updates.noteJobOutput(scope, output)
         if (succeeded) updates.markUpdated(scope, names)
+      },
+      afterRemove: (scope, names, succeeded) => {
+        previews.invalidate(scope, names)
+        if (succeeded) updates.markRemoved(scope, names)
       },
     }),
     catalog: new Catalog(cli),

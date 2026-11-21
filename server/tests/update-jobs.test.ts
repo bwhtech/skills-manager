@@ -109,8 +109,8 @@ describe("overlapping update jobs", () => {
     failed.actions.update({ scope: "/p", names: [] })
     await failed.release()
     expect(calls).toEqual([
-      ["user", ["foo"], true],
-      ["/p", [], false],
+      ["user", ["foo"], true, ""],
+      ["/p", [], false, ""],
     ])
   })
 

@@ -1,6 +1,6 @@
 import type { SkillSummary } from "@shared/api"
 import { cn } from "@/lib/utils"
-import { OriginBadge, UpdateBadge } from "./origin-badge"
+import { OriginBadge, UpstreamBadge } from "./origin-badge"
 
 interface SkillRowProps {
   skill: SkillSummary
@@ -27,7 +27,7 @@ export function SkillRow({ skill, selected, onSelect }: SkillRowProps) {
     >
       <div className="flex min-w-0 items-center gap-1.5">
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{skill.name}</span>
-        {skill.updateAvailable && <UpdateBadge skill={skill} />}
+        <UpstreamBadge skill={skill} />
         <OriginBadge origin={skill.origin} />
         {shared > 1 && (
           <span

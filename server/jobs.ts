@@ -9,6 +9,8 @@ export interface JobSpec {
   cwd: string
   /** update jobs: what they update, so overlapping runs can be refused */
   update?: Job["update"]
+  /** jobs with a remove step for deleted-upstream skills: the names it removes */
+  remove?: Job["remove"]
   /** does the work and returns an exit code */
   run: (log: JobLog) => Promise<number>
   /** called once the job has finished, whatever the outcome */
@@ -46,6 +48,7 @@ export class JobManager {
       endedAt: null,
       log: [],
       ...(spec.update ? { update: spec.update } : {}),
+      ...(spec.remove ? { remove: spec.remove } : {}),
     }
     this.jobs.unshift(job)
     this.prune()

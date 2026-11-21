@@ -14,7 +14,7 @@ import {
   readSkillFile,
   readSkillMd,
 } from "../discovery/skill-files.ts"
-import { forbidden, notFound, readJson } from "../lib/errors.ts"
+import { forbidden, HttpError, notFound, readJson } from "../lib/errors.ts"
 import { saveTextFile } from "../lib/files.ts"
 import { decodePathId, requireScope } from "../lib/validate.ts"
 import type { Services } from "../services.ts"
@@ -62,8 +62,17 @@ export function skillRoutes(svc: Services): Hono {
 
   app.get("/skills/:id/update-preview", async (c) => {
     const skill = await lookup(c.req.param("id"))
-    const body: UpdatePreview = await svc.previews.preview(skill)
-    return c.json(body)
+    try {
+      const body: UpdatePreview = await svc.previews.preview(skill)
+      return c.json(body)
+    } catch (err) {
+      // The preview mirrors how `skills update` finds the skill: gone means deleted upstream.
+      if (err instanceof HttpError && err.message === "not_upstream")
+        svc.updates.noteUpstream(skill.scope, {
+          deleted: [{ name: skill.cliName, source: cliSourceName(skill) }],
+        })
+      throw err
+    }
   })
 
   app.put("/skills/:id/skill-md", async (c) => {
@@ -91,11 +100,29 @@ export function skillRoutes(svc: Services): Hono {
   return app
 }
 
-function toSummary(skill: IndexedSkill, svc: Services): SkillSummary {
+export function toSummary(skill: IndexedSkill, svc: Pick<Services, "updates">): SkillSummary {
   const { cliName, folderName, placements, ...rest } = skill
   void placements // internal: where to remove from
+  const npx = skill.origin === "npx"
+  const deletedUpstream = npx && svc.updates.isDeleted(skill.scope, cliName)
   const updateAvailable =
-    skill.origin === "npx" &&
+    npx &&
+    !deletedUpstream &&
     svc.updates.has(skill.scope, [cliName, folderName, skill.name])
-  return { ...rest, removable: isRemovable(skill), updateAvailable }
+  return {
+    ...rest,
+    ...(npx ? { cliName } : {}),
+    removable: isRemovable(skill),
+    updateAvailable,
+    ...(deletedUpstream ? { deletedUpstream } : {}),
+  }
+}
+
+/** The source as `skills update` prints it: owner/repo for user scope, else the sourceUrl. */
+function cliSourceName(skill: IndexedSkill): string {
+  const source = skill.source
+  if (!source) return ""
+  return skill.scope === "user"
+    ? source.source
+    : (source.sourceUrl ?? source.source)
 }

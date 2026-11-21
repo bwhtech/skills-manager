@@ -1,6 +1,7 @@
 import type { SkillOrigin, SkillSummary } from "@shared/api"
 import { Badge } from "@/components/ui/badge"
 import { useIsBeingUpdated } from "@/lib/api"
+import { cliNameOf } from "@/lib/upstream"
 import { cn } from "@/lib/utils"
 
 const tone: Record<SkillOrigin, string> = {
@@ -29,11 +30,32 @@ export function OriginBadge({ origin, className }: { origin: SkillOrigin; classN
 }
 
 /** "update", or "Updating…" while an update job for the skill is queued or running. */
-export function UpdateBadge({ skill }: { skill: Pick<SkillSummary, "scope" | "name"> }) {
-  const running = useIsBeingUpdated(skill.scope, skill.name)
+export function UpdateBadge({ skill }: { skill: Pick<SkillSummary, "scope" | "name" | "cliName"> }) {
+  const running = useIsBeingUpdated(skill.scope, cliNameOf(skill))
   return (
     <Badge className="h-5 px-1.5 font-normal" title={running ? "An update is running" : "An update is available"}>
       {running ? "Updating…" : "update"}
     </Badge>
   )
+}
+
+/** In place of "update": the skill is gone from its source; Update offers to remove it. */
+export function DeletedUpstreamBadge({ skill }: { skill: Pick<SkillSummary, "scope" | "name" | "cliName"> }) {
+  const running = useIsBeingUpdated(skill.scope, cliNameOf(skill))
+  return (
+    <Badge
+      variant="destructive"
+      className="h-5 px-1.5 font-normal"
+      title={running ? "A remove is running" : "Deleted upstream: skills update skips it. Open it to remove the local copy."}
+    >
+      {running ? "Removing…" : "deleted upstream"}
+    </Badge>
+  )
+}
+
+/** The update-state badge of a skill: "deleted upstream" wins over "update". */
+export function UpstreamBadge({ skill }: { skill: SkillSummary }) {
+  if (skill.deletedUpstream) return <DeletedUpstreamBadge skill={skill} />
+  if (skill.updateAvailable) return <UpdateBadge skill={skill} />
+  return null
 }

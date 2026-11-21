@@ -12,7 +12,9 @@
     "verbatimModuleSyntax": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+    // src tests (e.g. src/lib/upstream.test.ts) import the contract as src does.
+    "paths": { "@shared/*": ["./shared/*"] }
   },
   "include": ["server", "shared", "src/**/*.test.ts"]
 }

@@ -25,9 +25,10 @@ import {
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, errorMessage, useScopes, useScopesMutation, useSkills } from "@/lib/api"
-import { basename, plural, timeAgo, tildify } from "@/lib/format"
+import { basename, timeAgo, tildify } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import { navigate, usePlace } from "@/lib/hash-state"
-import { useUpdateCounts } from "@/features/updates/update-status"
+import { countsLabel, useUpdateCounts, type ScopeCounts } from "@/features/updates/update-status"
 import { PinProjectDialog } from "./pin-project-dialog"
 import { ProjectMenu } from "./project-menu"
 
@@ -175,7 +176,7 @@ interface ProjectItemProps {
   /** another project has the same name: show the parent folder too */
   duplicate: boolean
   /** skills with an update in this project */
-  updates?: number
+  updates?: ScopeCounts
   onOpen: (scope: string) => void
 }
 
@@ -183,13 +184,19 @@ interface ProjectItemProps {
  * A small green "↑ 3" at the end of a scope's row: skills with an update
  * there. The arrow tells it apart from the skill count next to it.
  */
-function UpdateCount({ count }: { count?: number }) {
-  if (!count) return null
+/** Updates plus deleted-upstream skills; the label says which. Deleted only: a destructive tone. */
+function UpdateCount({ count: counts }: { count?: ScopeCounts }) {
+  const count = counts ? counts.updates + counts.deleted : 0
+  if (!counts || !count) return null
+  const label = countsLabel(counts)
   return (
     <span
-      className="mr-1 ml-auto flex shrink-0 items-center gap-0.5 rounded-full bg-primary py-px pr-1.5 pl-1 text-[0.625rem] leading-4 font-medium text-primary-foreground tabular-nums"
-      title={plural(count, "update")}
-      aria-label={plural(count, "update")}
+      className={cn(
+        "mr-1 ml-auto flex shrink-0 items-center gap-0.5 rounded-full py-px pr-1.5 pl-1 text-[0.625rem] leading-4 font-medium tabular-nums",
+        counts.updates ? "bg-primary text-primary-foreground" : "bg-destructive/15 text-destructive"
+      )}
+      title={label}
+      aria-label={label}
     >
       <HugeiconsIcon icon={ArrowUp02Icon} strokeWidth={2.5} className="size-2.5!" aria-hidden />
       {count}

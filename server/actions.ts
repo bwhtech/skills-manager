@@ -5,9 +5,9 @@ import {
   updateTargetsOverlap,
   type InstallRequest,
   type Job,
-  type UpdateRunRequest,
   type UpdateTarget,
 } from "../shared/api.ts"
+import { parseCheckOutput } from "./cli/parsers.ts"
 import type { SkillsCli } from "./cli/skills-cli.ts"
 import { config } from "./config.ts"
 import {
@@ -15,13 +15,37 @@ import {
   type IndexedSkill,
   type SkillPlacement,
 } from "./discovery/skill-index.ts"
+import { cleanLine } from "./lib/ansi.ts"
 import { forbidden, HttpError } from "./lib/errors.ts"
 import { isInside, realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
 
 export interface ActionHooks {
-  /** after an update job, whatever the outcome; names empty = every skill in the scope */
-  afterUpdate?: (scope: string, names: string[], succeeded: boolean) => void
+  /**
+   * after an update step, whatever the outcome; names empty = every skill in the scope.
+   * `output` is the step's CLI output (it names skills deleted upstream).
+   */
+  afterUpdate?: (
+    scope: string,
+    names: string[],
+    succeeded: boolean,
+    output: string
+  ) => void
+  /** after a `skills remove` of npx skills (CLI names), whatever the outcome */
+  afterRemove?: (scope: string, names: string[], succeeded: boolean) => void
+}
+
+export interface UpdateJobRequest {
+  scope: string
+  /** empty = every skill in the scope, or none when `remove` is set */
+  names: string[]
+  /** deleted-upstream CLI names to remove after the update (the caller validated them) */
+  remove?: string[]
+}
+
+interface StepResult {
+  code: number
+  output: string
 }
 
 /** Builds and queues the jobs that change installed skills. */
@@ -52,11 +76,25 @@ export class SkillActions {
     )
   }
 
-  /** 409 update_in_progress when a queued or running update job overlaps. */
-  update(
-    req: Required<Pick<UpdateRunRequest, "scope">> & { names: string[] }
-  ): Job {
-    const target: UpdateTarget = { scope: req.scope, names: req.names }
+  /**
+   * `skills update`, then (with `remove`) `skills remove` for deleted-upstream skills, as two
+   * steps of one job. The remove step is skipped when the update step fails. With `remove`
+   * and no names, only the remove step runs. 409 update_in_progress when a queued or running
+   * update job overlaps.
+   */
+  update(req: UpdateJobRequest): Job {
+    const { scope } = req
+    const remove = [...new Set(req.remove ?? [])]
+    const removeOnly = req.names.length === 0 && remove.length > 0
+    const names = removeOnly ? [] : req.names
+    const target: UpdateTarget = {
+      scope,
+      names: removeOnly
+        ? remove
+        : names.length
+          ? [...new Set([...names, ...remove])]
+          : [],
+    }
     const busy = this.jobs
       .unfinished()
       .find((j) => j.update && updateTargetsOverlap(j.update, target))
@@ -67,34 +105,99 @@ export class SkillActions {
         `An update of the same skills is already queued or running: ${busy.title}`,
         { jobId: busy.id }
       )
-    const args = [
-      "update",
-      ...req.names,
-      req.scope === "user" ? "-g" : "-p",
-      "-y",
+    const updateArgs = ["update", ...names, scope === "user" ? "-g" : "-p", "-y"]
+    const removeArgs = removeArgsFor(scope, remove)
+    const steps = [
+      ...(removeOnly ? [] : [updateArgs]),
+      ...(remove.length ? [removeArgs] : []),
     ]
-    const what = req.names.length ? req.names.join(", ") : "all skills"
-    return this.cliJob(
-      "update",
-      `Update ${what} (${scopeLabel(req.scope)})`,
+    const cwd = scopeCwd(scope)
+    let updated: StepResult | null = null
+    let removed: StepResult | null = null
+
+    const run = async (log: JobLog): Promise<number> => {
+      if (!removeOnly) {
+        if (steps.length > 1) log(`Step 1 of 2: ${this.cli.display(updateArgs)}`)
+        updated = await this.runStep(updateArgs, cwd, log)
+        if (!remove.length) return updated.code
+        if (!updateSucceeded(updated)) {
+          log("Step 2 of 2 skipped: the update failed, so nothing was removed.")
+          return updated.code || 1
+        }
+        log("")
+        log(`Step 2 of 2: ${this.cli.display(removeArgs)}`)
+      }
+      removed = await this.runStep(removeArgs, cwd, log)
+      return removeSucceeded(removed) ? 0 : removed.code || 1
+    }
+
+    const what = names.length ? names.join(", ") : "all skills"
+    const title = removeOnly
+      ? `Remove ${remove.join(", ")} (deleted upstream, ${scopeLabel(scope)})`
+      : remove.length
+        ? `Update ${what}, remove ${remove.join(", ")} (${scopeLabel(scope)})`
+        : `Update ${what} (${scopeLabel(scope)})`
+    return this.jobs.enqueue({
+      kind: removeOnly ? "remove" : "update",
+      title,
+      command: steps.map((args) => this.cli.display(args)).join(" && "),
+      cwd,
+      update: target,
+      ...(remove.length ? { remove } : {}),
+      run,
+      onDone: () => {
+        const u = updated as StepResult | null
+        const r = removed as StepResult | null
+        if (u) this.hooks.afterUpdate?.(scope, names, updateSucceeded(u), u.output)
+        if (remove.length)
+          this.hooks.afterRemove?.(scope, remove, !!r && removeSucceeded(r))
+      },
+    })
+  }
+
+  /** Runs one CLI step into the job log, and keeps its output. */
+  private async runStep(
+    args: string[],
+    cwd: string,
+    log: JobLog
+  ): Promise<StepResult> {
+    const lines: string[] = []
+    const { exitCode, timedOut } = await this.cli.stream(
       args,
-      req.scope,
-      (job) =>
-        this.hooks.afterUpdate?.(req.scope, req.names, job.status === "success"),
-      target
+      cwd,
+      (line) => {
+        lines.push(line)
+        log(line)
+      },
+      config.cliTimeoutMs * 5
     )
+    if (timedOut) log("Timed out; the command was stopped.")
+    return { code: timedOut ? exitCode || 1 : exitCode, output: lines.join("\n") }
   }
 
   remove(skill: IndexedSkill): Job {
     if (skill.origin === "npx") {
-      const args = ["remove", "-s", skill.cliName, "-y"]
-      if (skill.scope === "user") args.push("-g")
-      return this.cliJob(
-        "remove",
-        `Remove ${skill.cliName} (${scopeLabel(skill.scope)})`,
-        args,
-        skill.scope
-      )
+      const args = removeArgsFor(skill.scope, [skill.cliName])
+      const cwd = scopeCwd(skill.scope)
+      let result: StepResult | null = null
+      return this.jobs.enqueue({
+        kind: "remove",
+        title: `Remove ${skill.cliName} (${scopeLabel(skill.scope)})`,
+        command: this.cli.display(args),
+        cwd,
+        run: async (log) => {
+          result = await this.runStep(args, cwd, log)
+          return removeSucceeded(result) ? 0 : result.code || 1
+        },
+        onDone: () => {
+          const r = result as StepResult | null
+          this.hooks.afterRemove?.(
+            skill.scope,
+            [skill.cliName],
+            !!r && removeSucceeded(r)
+          )
+        },
+      })
     }
     if (skill.origin !== "manual")
       throw forbidden(`${skill.origin} skills cannot be removed here`)
@@ -115,30 +218,56 @@ export class SkillActions {
     kind: Job["kind"],
     title: string,
     args: string[],
-    scope: string,
-    onDone?: (job: Job) => void,
-    update?: UpdateTarget
+    scope: string
   ): Job {
-    const cwd = scope === "user" ? config.home : scope
+    const cwd = scopeCwd(scope)
     return this.jobs.enqueue({
       kind,
       title,
       command: this.cli.display(args),
       cwd,
-      update,
-      onDone,
-      run: async (log) => {
-        const { exitCode, timedOut } = await this.cli.stream(
-          args,
-          cwd,
-          log,
-          config.cliTimeoutMs * 5
-        )
-        if (timedOut) log("Timed out; the command was stopped.")
-        return exitCode
-      },
+      run: async (log) => (await this.runStep(args, cwd, log)).code,
     })
   }
+}
+
+function scopeCwd(scope: string): string {
+  return scope === "user" ? config.home : scope
+}
+
+function removeArgsFor(scope: string, names: string[]): string[] {
+  const args = ["remove", "-s", ...names, "-y"]
+  if (scope === "user") args.push("-g")
+  return args
+}
+
+/**
+ * `skills update` exits 1 when a skill failed. A skill that is gone from its download
+ * ("is no longer in this download") counts as failed too; when those are the only
+ * failures, the update itself went fine and removing them is what fixes it.
+ */
+export function updateSucceeded({ code, output }: StepResult): boolean {
+  if (code === 0) return true
+  if (code !== 1) return false
+  const report = parseCheckOutput(output)
+  return (
+    report.goneFromDownload > 0 &&
+    report.failCount === report.goneFromDownload &&
+    report.failures.length === 0
+  )
+}
+
+// `skills remove` exits 0 even when it removed nothing (skills 1.9.0 removeCommand).
+const REMOVE_FAILED = [
+  /Failed to remove \d+ skill\(s\)/,
+  /No matching skills found for/,
+  /No skills found to remove/,
+]
+
+export function removeSucceeded({ code, output }: StepResult): boolean {
+  if (code !== 0) return false
+  const lines = output.split("\n").map((line) => cleanLine(line))
+  return !lines.some((line) => REMOVE_FAILED.some((re) => re.test(line)))
 }
 
 /**

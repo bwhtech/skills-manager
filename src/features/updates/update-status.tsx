@@ -19,12 +19,32 @@ import { errorMessage, useCheckUpdates, useScopes, useUpdates } from "@/lib/api"
 import { basename, plural, scopeLabel, timeAgo } from "@/lib/format"
 import { navigate } from "@/lib/hash-state"
 import { ui } from "@/lib/ui-store"
+import { deletedInScope } from "@/lib/upstream"
 
-/** Skill names with an update, counted per scope. */
-export function countUpdatesByScope(status: Status | undefined): Map<ScopeKey, number> {
-  const counts = new Map<ScopeKey, number>()
-  for (const item of status?.available ?? []) counts.set(item.scope, (counts.get(item.scope) ?? 0) + 1)
+export interface ScopeCounts {
+  /** skill names with an update */
+  updates: number
+  /** skills deleted upstream (Update all offers to remove them) */
+  deleted: number
+}
+
+/** Updates and deleted-upstream skills, counted per scope. */
+export function countUpdatesByScope(status: Status | undefined): Map<ScopeKey, ScopeCounts> {
+  const counts = new Map<ScopeKey, ScopeCounts>()
+  const get = (scope: ScopeKey) => {
+    const found = counts.get(scope) ?? { updates: 0, deleted: 0 }
+    counts.set(scope, found)
+    return found
+  }
+  for (const item of status?.available ?? []) get(item.scope).updates++
+  for (const item of status?.deletedUpstream ?? []) get(item.scope).deleted++
   return counts
+}
+
+/** "3 updates · 1 deleted upstream", "1 deleted upstream", "3 updates"; short: "3 updates · 1 deleted". */
+export function countsLabel({ updates, deleted }: ScopeCounts, short = false) {
+  const gone = deleted && `${deleted} deleted${short ? "" : " upstream"}`
+  return [updates && plural(updates, "update"), gone].filter(Boolean).join(" · ")
 }
 
 /** The update counts per scope, for the sidebar. */
@@ -35,7 +55,9 @@ export function useUpdateCounts() {
 export interface OtherScope {
   scope: ScopeKey
   name: string
+  /** updates plus deleted-upstream skills */
   count: number
+  counts: ScopeCounts
 }
 
 /**
@@ -52,12 +74,17 @@ export function useUpdateActions(scope: ScopeKey) {
   const checking = !!status?.checking || check.isPending
   const scopeName = scopeLabel(scope, projects)
   const inScope = status?.available.filter((item) => item.scope === scope) ?? []
+  const deletedHere = deletedInScope(status, scope)
+  const counts: ScopeCounts = { updates: inScope.length, deleted: deletedHere.length }
+  /** updates plus deleted-upstream skills here: what Update all acts on */
+  const actionable = counts.updates + counts.deleted
   const others: OtherScope[] = [...countUpdatesByScope(status)]
     .filter(([other]) => other !== scope)
-    .map(([other, count]) => ({ scope: other, name: scopeLabel(other, projects), count }))
+    .map(([other, c]) => ({ scope: other, name: scopeLabel(other, projects), count: c.updates + c.deleted, counts: c }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
   const otherTotal = others.reduce((sum, other) => sum + other.count, 0)
   const failed = status?.failed ?? []
+  const scopeError = status?.scopeErrors?.find((item) => item.scope === scope)?.error ?? null
 
   const refresh = () =>
     check.mutate(undefined, {
@@ -67,12 +94,17 @@ export function useUpdateActions(scope: ScopeKey) {
   // Opens the confirm dialog with a per-skill preview; the dialog runs the update.
   const updateAll = () => ui.openUpdateAll(scope)
 
-  /** "3 updates in User", or "User is up to date" */
+  /**
+   * "3 updates · 1 deleted upstream in User", "Couldn't verify updates for User", or
+   * "User is up to date": only after a check of this scope that did not fail.
+   */
   const headline = !status?.checkedAt
     ? "Not checked yet"
-    : inScope.length
-      ? `${plural(inScope.length, "update")} in ${scopeName}`
-      : `${scopeName} is up to date`
+    : actionable
+      ? `${countsLabel(counts)} in ${scopeName}${scopeError ? " (some checks failed)" : ""}`
+      : scopeError
+        ? `Couldn't verify updates for ${scopeName}`
+        : `${scopeName} is up to date`
   /** "62 in other projects", or "" */
   const otherLine = otherTotal ? `${otherTotal} in ${otherScopesLabel(others)}` : ""
   /** when the last check ran */
@@ -85,6 +117,10 @@ export function useUpdateActions(scope: ScopeKey) {
     checking,
     scopeName,
     inScope,
+    deletedHere,
+    counts,
+    actionable,
+    scopeError,
     others,
     otherTotal,
     failed,
@@ -107,8 +143,8 @@ function otherScopesLabel(others: OtherScope[]) {
 
 export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName: string }) {
   const actions = useUpdateActions(scope)
-  const { status, checking, inScope, otherTotal, summary, errorLine, refresh, updateAll } = actions
-  const showBadge = !!status && (inScope.length > 0 || otherTotal > 0 || !!status.error)
+  const { status, checking, actionable, otherTotal, summary, errorLine, refresh, updateAll } = actions
+  const showBadge = !!status && (actionable > 0 || otherTotal > 0 || !!status.error)
 
   return (
     <div className="flex items-center gap-1.5">
@@ -131,11 +167,11 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
           </DropdownMenuContent>
         </DropdownMenu>
       )}
-      {inScope.length > 0 && (
+      {actionable > 0 && (
         <Button size="sm" className="h-7" onClick={updateAll}>
           <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />
           <span className="hidden xl:inline">Update all in {scopeName}</span>
-          <span className="xl:hidden">Update {inScope.length}</span>
+          <span className="xl:hidden">Update {actionable}</span>
         </Button>
       )}
       <Tooltip>
@@ -162,11 +198,11 @@ type Actions = ReturnType<typeof useUpdateActions>
 
 /** This scope's count; other scopes only as a quieter outline when this one has none. */
 function ScopeBadge({ actions }: { actions: Actions }) {
-  const { status, inScope, otherTotal } = actions
-  if (inScope.length > 0) {
+  const { status, counts, actionable, otherTotal } = actions
+  if (actionable > 0) {
     return (
-      <Badge className="h-6 px-2 tabular-nums">
-        {plural(inScope.length, "update")}
+      <Badge variant={counts.updates ? "default" : "destructive"} className="h-6 px-2 tabular-nums">
+        {countsLabel(counts)}
         {status?.error && " · errors"}
       </Badge>
     )
@@ -216,9 +252,12 @@ export function UpdateOverview({ actions, compact = false }: { actions: Actions;
             <DropdownMenuLabel>{actions.otherLine}</DropdownMenuLabel>
             {listed.map((other) => (
               <DropdownMenuItem key={other.scope} onClick={() => navigate({ scope: other.scope })}>
-                <span className="min-w-0 flex-1 truncate">{other.name}</span>
-                <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
-                  {plural(other.count, "update")}
+                <span className="min-w-12 flex-1 truncate">{other.name}</span>
+                <span
+                  className="ml-auto min-w-0 shrink truncate text-xs text-muted-foreground tabular-nums"
+                  title={countsLabel(other.counts)}
+                >
+                  {countsLabel(other.counts, true)}
                 </span>
               </DropdownMenuItem>
             ))}

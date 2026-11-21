@@ -208,21 +208,43 @@ export function useUpdates() {
 }
 
 /**
- * When a background check ends (UpdateStatus.checking goes from true to false),
- * refetch the skills: their updateAvailable flags come from that check.
+ * When a background check ends, refetch the skills: their updateAvailable and
+ * deletedUpstream flags come from that check. A check ends when UpdateStatus.checking
+ * goes from true to false, or when checkedAt changes: a fast check can start and end
+ * between two status fetches, so the client never sees checking: true.
  * Call once for the app's query client.
  */
 export function refreshSkillsAfterChecks(client: QueryClient) {
   let checking = false
+  let checkedAt: string | null | undefined
   return client.getQueryCache().subscribe((event) => {
     if (event.type !== "updated" || event.query.queryKey[0] !== keys.updates[0]) return
     const data = event.query.state.data as UpdateStatus | undefined
     if (!data) return
-    if (checking && !data.checking) {
+    const finished = checking && !data.checking
+    const newRound = checkedAt !== undefined && data.checkedAt !== checkedAt
+    if (finished || newRound) {
       void client.invalidateQueries({ queryKey: ["skills"] })
       void client.invalidateQueries({ queryKey: ["skill"] })
     }
     checking = data.checking
+    checkedAt = data.checkedAt
+  })
+}
+
+/**
+ * A preview that finds the skill deleted upstream (409 not_upstream) also adds it to
+ * UpdateStatus.deletedUpstream on the server: refetch the status and the skills, so the
+ * badge and counts show it. Call once for the app's query client.
+ */
+export function refreshAfterDeletedPreviews(client: QueryClient) {
+  return client.getQueryCache().subscribe((event) => {
+    if (event.type !== "updated" || event.action.type !== "error") return
+    if (event.query.queryKey[0] !== keys.updatePreviews[0]) return
+    if (!previewFailure(event.action.error).deletedUpstream) return
+    void client.invalidateQueries({ queryKey: keys.updates })
+    void client.invalidateQueries({ queryKey: ["skills"] })
+    void client.invalidateQueries({ queryKey: ["skill"] })
   })
 }
 
@@ -271,11 +293,14 @@ export function useUpdatePreview(id: string | null, enabled = true) {
  */
 export function previewFailure(error: unknown) {
   const status = error instanceof HttpError ? error.status : 0
+  const code = error instanceof HttpError ? error.body.error : null
   const message =
     error instanceof HttpError ? (error.body.detail ?? error.body.error) : errorMessage(error)
   const blocking = status === 400 || status === 409
   const tooLarge = status === 413
-  return { status, message, blocking, tooLarge }
+  /** 409 not_upstream: the skill is gone from its source; the dialog offers to remove it */
+  const deletedUpstream = status === 409 && code === "not_upstream"
+  return { status, code, message, blocking, tooLarge, deletedUpstream }
 }
 
 export function useSearch(text: string) {

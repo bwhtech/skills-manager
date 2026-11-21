@@ -23,10 +23,11 @@ import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { modKey } from "@/components/editor/editor-toolbar"
-import { UpdateOverview, UpdateStatus, useUpdateActions } from "@/features/updates/update-status"
+import { countsLabel, UpdateOverview, UpdateStatus, useUpdateActions } from "@/features/updates/update-status"
 import { useIsDesktop } from "@/hooks/use-media-query"
 import { useJobs, useScopes } from "@/lib/api"
-import { plural, scopeLabel, tildify } from "@/lib/format"
+import { scopeLabel, tildify } from "@/lib/format"
+import { cn } from "@/lib/utils"
 import { navigate, usePlace, type MainTab } from "@/lib/hash-state"
 import { ui } from "@/lib/ui-store"
 import { ThemeToggle, useThemeToggle } from "./theme-toggle"
@@ -112,11 +113,11 @@ function PhoneHeader() {
   const { scope, tab, name, running } = useHeaderData()
   const updates = useUpdateActions(scope)
   const theme = useThemeToggle()
-  // The dot means "updates here"; a running job shows a spinning ring instead.
-  const hasUpdates = updates.inScope.length > 0
+  // The dot means "updates or deleted-upstream skills here"; a running job shows a spinning ring instead.
+  const hasUpdates = updates.actionable > 0
   const label = [
     "More actions",
-    hasUpdates && plural(updates.inScope.length, "update"),
+    hasUpdates && countsLabel(updates.counts),
     running > 0 && `${running} job${running === 1 ? "" : "s"} running`,
   ]
     .filter(Boolean)
@@ -148,7 +149,15 @@ function PhoneHeader() {
                 className="absolute top-2 right-2 size-2.5 animate-spin rounded-full border-2 border-primary border-t-transparent motion-reduce:animate-none"
               />
             ) : (
-              hasUpdates && <span aria-hidden className="absolute top-2.5 right-2.5 size-2 rounded-full bg-primary" />
+              hasUpdates && (
+                <span
+                  aria-hidden
+                  className={cn(
+                    "absolute top-2.5 right-2.5 size-2 rounded-full",
+                    updates.counts.updates ? "bg-primary" : "bg-destructive"
+                  )}
+                />
+              )
             )}
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-72">
@@ -166,10 +175,10 @@ function PhoneHeader() {
                 </span>
               </span>
             </DropdownMenuItem>
-            {updates.inScope.length > 0 && (
+            {updates.actionable > 0 && (
               <DropdownMenuItem onClick={updates.updateAll}>
                 <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />
-                <span className="truncate">Update all {updates.inScope.length} in {name}…</span>
+                <span className="truncate">Update all {updates.actionable} in {name}…</span>
               </DropdownMenuItem>
             )}
             {(updates.others.length > 0 || updates.errorLine) && (

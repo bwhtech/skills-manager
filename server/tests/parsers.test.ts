@@ -46,6 +46,113 @@ const PROJECT_FAILURES = [
   "1 skill(s) differ from skills-lock.json; run npx skills install --force to restore them",
 ].join("\n")
 
+// Real `skills check -g` output (skills 1.9.0, this server, NO_COLOR=1), trimmed.
+const USER_DELETED = [
+  "Checking for skill updates…",
+  "",
+  "Fetching 11 sources…",
+  "Checking skills from source: heygen-com/hyperframes",
+  "  Skill paths changed; resolving via Git clone",
+  "[SKILLS_SKILL_SKIPPED] ⚠ Skipped /tmp/skills-f1I5bz/scripts/fixtures/registry-pinned-command/SKILL.md — missing required frontmatter field(s): name, description",
+  "",
+  `${DIM}Warning:${RESET} The following skills from ${DIM}heygen-com/hyperframes${RESET} appear to have been deleted upstream:`,
+  `  ${DIM}•${RESET} hyperframes-animation`,
+  `  ${DIM}•${RESET} hyperframes-core`,
+  `${DIM}Skipping deletion in non-interactive mode.${RESET}`,
+  "Checking skills from source: emilkowalski/skill",
+  "Checking skills from source: vercel-labs/skills",
+  "✓ All global skills are up to date",
+  "",
+].join("\n")
+
+// Real `skills check -p` output for a file:// git source with one skill deleted upstream.
+const PROJECT_DELETED = [
+  "Checking for skill updates…",
+  "",
+  "Updating for: Claude Code",
+  "Checking 3 skill(s)…",
+  "",
+  "Fetching 1 source…",
+  "",
+  "Warning: The following skills from file:///mnt/data/tmp/sm-del/upstream.git appear to have been deleted upstream:",
+  "  • gamma-skill",
+  "Skipping deletion in non-interactive mode.",
+  "↑ alpha-skill has an update",
+  "1 project skill(s) already up to date",
+  "",
+  "1 skill(s) can be updated; run npx skills update to install",
+  "",
+].join("\n")
+
+// checkAndPromptForDeletions prints this block before the deleted one.
+const AMBIGUOUS = [
+  "Checking skills from source: owner/repo",
+  "",
+  "Warning: Multiple current paths match these skills from owner/repo; skipping them rather than deleting or migrating the wrong skill:",
+  "  • twin-skill",
+  "",
+  "Warning: The following skills from owner/repo appear to have been deleted upstream:",
+  "  • gone-skill",
+  "Skipping deletion in non-interactive mode.",
+  "✓ All global skills are up to date",
+].join("\n")
+
+describe("deleted upstream", () => {
+  test("user scope: the warning block lists the deleted skills with their source", () => {
+    const report = parseCheckOutput(USER_DELETED)
+    expect(report.deleted).toEqual([
+      { name: "hyperframes-animation", source: "heygen-com/hyperframes" },
+      { name: "hyperframes-core", source: "heygen-com/hyperframes" },
+    ])
+    expect(report.updates).toEqual([])
+    expect(report.failures).toEqual([])
+    expect(report.ambiguous).toEqual([])
+    expect(interpretCheck("user scope", 0, USER_DELETED).error).toBeNull()
+  })
+
+  test("project scope: the source is the lock's sourceUrl; updates stay apart", () => {
+    const res = interpretCheck("/p", 1, PROJECT_DELETED)
+    expect(res.error).toBeNull()
+    expect(res.updates).toEqual(["alpha-skill"])
+    expect(res.deleted).toEqual([
+      { name: "gamma-skill", source: "file:///mnt/data/tmp/sm-del/upstream.git" },
+    ])
+  })
+
+  test("ambiguous skills are a separate list and never deleted ones", () => {
+    const report = parseCheckOutput(AMBIGUOUS)
+    expect(report.ambiguous).toEqual([{ name: "twin-skill", source: "owner/repo" }])
+    expect(report.deleted).toEqual([{ name: "gone-skill", source: "owner/repo" }])
+  })
+
+  test("the list ends at the first line that is not a bullet", () => {
+    const report = parseCheckOutput(
+      [
+        "Warning: The following skills from a/b appear to have been deleted upstream:",
+        "  • one",
+        "Checking skills from source: c/d",
+        "• not-a-deleted-skill",
+      ].join("\n")
+    )
+    expect(report.deleted).toEqual([{ name: "one", source: "a/b" }])
+  })
+
+  test("a skill gone from its download is not counted as a failed check", () => {
+    const out = [
+      "Checking skills from source: https://example.com/skills.zip",
+      "  ✗ old-thing is no longer in this download",
+      "",
+      "Failed to update 1 skill(s)",
+    ].join("\n")
+    const res = interpretCheck("user scope", 1, out)
+    expect(res.error).toBeNull()
+    expect(res.failures).toEqual([])
+    expect(res.deleted).toEqual([
+      { name: "old-thing", source: "https://example.com/skills.zip" },
+    ])
+  })
+})
+
 describe("parseCheckOutput", () => {
   test("collects names from update lines and ignores the rest", () => {
     const report = parseCheckOutput(UPDATES_ONLY)
@@ -59,7 +166,15 @@ describe("parseCheckOutput", () => {
       parseCheckOutput(
         "Checking for skill updates…\n✓ All global skills are up to date\n"
       )
-    ).toEqual({ updates: [], failures: [], failCount: 0, explainsExit: false })
+    ).toEqual({
+      updates: [],
+      failures: [],
+      failCount: 0,
+      deleted: [],
+      ambiguous: [],
+      goneFromDownload: 0,
+      explainsExit: false,
+    })
   })
 
   test("reads failed checks apart from updates", () => {
@@ -72,8 +187,12 @@ describe("parseCheckOutput", () => {
         reason: "could not fetch or read the source",
       },
       { name: "https://example.com/skills.zip", reason: "HTTP 404" },
-      { name: "old-thing", reason: "no longer in its download source" },
     ])
+    // Gone from its download: deleted upstream, not a failed check.
+    expect(report.deleted).toEqual([
+      { name: "old-thing", source: "https://example.com/skills.zip" },
+    ])
+    expect(report.goneFromDownload).toBe(1)
   })
 
   test("project failures and the Error: line", () => {
@@ -103,9 +222,11 @@ describe("interpretCheck", () => {
 
   test("exit 1 with failed checks sets an error and keeps the updates", () => {
     const res = interpretCheck("user scope", 1, WITH_FAILURES)
-    expect(res.error).toBe("user scope: 3 skills could not be checked")
+    // 3 failed in the CLI's count, one of them gone from its download (deleted upstream).
+    expect(res.error).toBe("user scope: 2 skills could not be checked")
     expect(res.updates).toEqual(["animate"])
-    expect(res.failures).toHaveLength(3)
+    expect(res.failures).toHaveLength(2)
+    expect(res.deleted).toHaveLength(1)
   })
 
   test("exit 0 with a failed source still reports it", () => {

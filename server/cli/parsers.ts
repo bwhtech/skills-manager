@@ -2,6 +2,16 @@ import type { RepoSkill } from "../../shared/api.ts"
 import { cleanLine } from "../lib/ansi.ts"
 
 const UPDATE_LINE = /^↑\s+(.+?)\s+has an update$/
+// promptDeletions and checkAndPromptForDeletions in skills 1.9.0 (cli.mjs). `check` runs with
+// options.yes, so it prints the same blocks as `update -y`, then "Skipping deletion…".
+const DELETED_HEAD =
+  /^Warning: The following skills from (.+) appear to have been deleted upstream:$/
+const AMBIGUOUS_HEAD =
+  /^Warning: Multiple current paths match these skills from (.+); skipping them rather than deleting or migrating the wrong skill:$/
+const BULLET = /^•\s+(.+)$/
+const SOURCE_LINE = /^Checking skills from source: (.+)$/
+// processDownloadUpdates: the skill is gone from its download. Counted as a failure by the CLI.
+const GONE_FROM_DOWNLOAD = /^✗ (.+?) is no longer in this download$/
 const FAIL_COUNT = /^Failed to update (\d+) skill\(s\)$/
 // Summary lines that come with exit code 1 when nothing failed.
 const EXIT_ONE = [
@@ -23,10 +33,6 @@ const FAILURES: [RegExp, (m: RegExpExecArray) => CheckFailure][] = [
     (m) => ({ name: m[1], reason: "could not fetch or read the source" }),
   ],
   [/^✗ Cannot update (\S+): (.+)$/, (m) => ({ name: m[1], reason: m[2] })],
-  [
-    /^✗ (.+?) is no longer in this download$/,
-    (m) => ({ name: m[1], reason: "no longer in its download source" }),
-  ],
   [/^✗ (.+)$/, (m) => ({ name: m[1], reason: "check failed" })],
   [/^Error: (.+)$/, (m) => ({ name: "skills check", reason: m[1] })],
 ]
@@ -37,12 +43,29 @@ export interface CheckFailure {
   reason: string
 }
 
+/** A locked skill the CLI could not find upstream, as the CLI prints it. */
+export interface UpstreamSkill {
+  /** the lock key, i.e. the name `skills remove` takes */
+  name: string
+  /** the source the CLI names: owner/repo (user scope) or the lock's sourceUrl (project scope) */
+  source: string
+}
+
 export interface CheckReport {
   /** skill names with an update */
   updates: string[]
   failures: CheckFailure[]
   /** from "Failed to update N skill(s)"; 0 when the line is missing */
   failCount: number
+  /**
+   * skills deleted upstream: `skills update` skips them and never deletes them
+   * when it runs non-interactively. Never in `updates`.
+   */
+  deleted: UpstreamSkill[]
+  /** several upstream paths match: the CLI skips them; never offer to delete them */
+  ambiguous: UpstreamSkill[]
+  /** how many of `deleted` came from "is no longer in this download" (also in failCount) */
+  goneFromDownload: number
   /** a summary line explains exit code 1 (updates, local changes, failures) */
   explainsExit: boolean
 }
@@ -59,11 +82,44 @@ export function parseCheckOutput(output: string): CheckReport {
     updates: [],
     failures: [],
     failCount: 0,
+    deleted: [],
+    ambiguous: [],
+    goneFromDownload: 0,
     explainsExit: false,
   }
+  /** the "• name" list being read, and the source it belongs to */
+  let list: { into: UpstreamSkill[]; source: string } | null = null
+  let source = ""
   for (const raw of output.split("\n")) {
     const line = cleanLine(raw).trim()
     if (!line) continue
+    if (list) {
+      const bullet = BULLET.exec(line)
+      if (bullet) {
+        addUnique(list.into, { name: bullet[1], source: list.source })
+        continue
+      }
+      list = null
+    }
+    const head = DELETED_HEAD.exec(line) ?? AMBIGUOUS_HEAD.exec(line)
+    if (head) {
+      const into = line.startsWith("Warning: Multiple")
+        ? report.ambiguous
+        : report.deleted
+      list = { into, source: head[1] }
+      continue
+    }
+    const checking = SOURCE_LINE.exec(line)
+    if (checking) {
+      source = checking[1]
+      continue
+    }
+    const gone = GONE_FROM_DOWNLOAD.exec(line)
+    if (gone) {
+      if (addUnique(report.deleted, { name: gone[1], source }))
+        report.goneFromDownload++
+      continue
+    }
     const update = UPDATE_LINE.exec(line)
     if (update) {
       if (!report.updates.includes(update[1])) report.updates.push(update[1])
@@ -83,7 +139,17 @@ export function parseCheckOutput(output: string): CheckReport {
     if (failure) report.failures.push(failure)
   }
   if (report.failures.length > 0) report.explainsExit = true
+  // A skill can be listed as deleted and (ambiguous) never both; deleted ones never update.
+  const deleted = new Set(report.deleted.map((d) => d.name))
+  report.updates = report.updates.filter((name) => !deleted.has(name))
   return report
+}
+
+function addUnique(list: UpstreamSkill[], item: UpstreamSkill): boolean {
+  if (list.some((x) => x.name === item.name && x.source === item.source))
+    return false
+  list.push(item)
+  return true
 }
 
 function parseFailure(line: string): CheckFailure | null {

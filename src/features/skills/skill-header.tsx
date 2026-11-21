@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge"
 import { useScopes } from "@/lib/api"
 import { scopeLabel } from "@/lib/format"
 import { usePlace } from "@/lib/hash-state"
-import { OriginBadge, UpdateBadge } from "./origin-badge"
+import { OriginBadge, UpstreamBadge } from "./origin-badge"
 import { skillReadOnlyReason } from "./read-only-reason"
 import { RemoveSkillButton } from "./remove-skill-button"
 import { UpdateSkillButton } from "./update-skill-button"
@@ -15,9 +15,11 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
   const projects = useScopes().data?.projects
   const alsoIn = skill.scopes.filter((scope) => scope !== viewed).map((scope) => scopeLabel(scope, projects))
   const readOnly = skillReadOnlyReason(skill)
-  // Manual skills in a project's own skills/ folder show Remove, disabled.
-  const showRemove = skill.origin === "npx" || skill.origin === "manual"
-  const updatable = skill.origin === "npx" && skill.updateAvailable
+  // Manual skills in a project's own skills/ folder show Remove, disabled. A skill deleted
+  // upstream gets "Remove (deleted upstream)" instead, which runs the same skills remove.
+  const showRemove = (skill.origin === "npx" && !skill.deletedUpstream) || skill.origin === "manual"
+  // A skill deleted upstream gets "Remove (deleted upstream)" in place of Update.
+  const updatable = skill.origin === "npx" && (skill.updateAvailable || !!skill.deletedUpstream)
 
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-b px-4 py-3">
@@ -25,7 +27,7 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
       <div className="flex min-h-7 items-center gap-2 max-md:flex-wrap max-md:gap-y-1.5">
         <h2 className="min-w-0 truncate text-base font-semibold max-md:hidden">{skill.name}</h2>
         <OriginBadge origin={skill.origin} />
-        {skill.updateAvailable && <UpdateBadge skill={skill} />}
+        <UpstreamBadge skill={skill} />
         {readOnly && (
           <Badge variant="secondary" className="h-5 px-1.5 font-normal" title={readOnly}>
             <HugeiconsIcon icon={LockIcon} strokeWidth={2} data-icon="inline-start" />

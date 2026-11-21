@@ -1,25 +1,29 @@
 import { useRef, useState } from "react"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { ArrowRight01Icon, CircleArrowUp02Icon } from "@hugeicons/core-free-icons"
+import { ArrowRight01Icon, CircleArrowUp02Icon, Delete02Icon } from "@hugeicons/core-free-icons"
 import { toast } from "sonner"
-import type { SkillSummary, UpdatePreview } from "@shared/api"
+import type { SkillSummary, UpdatePreview, UpstreamSkillRef } from "@shared/api"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Spinner } from "@/components/ui/spinner"
 import {
   api,
   errorMessage,
+  isBeingUpdated,
   previewFailure,
-  useIsBeingUpdated,
   useJobMutation,
+  useRunningUpdates,
   useScopes,
   useUpdatePreview,
+  useUpdates,
 } from "@/lib/api"
 import { plural, scopeLabel } from "@/lib/format"
+import { ambiguousInScope, cliNameOf, cliSourceOf, deletedInScope, sameSource } from "@/lib/upstream"
 import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "./file-changes"
 import { OVERWRITE_DETAIL } from "./copy"
+import { AmbiguousUpstreamNote, confirmLabel, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
 import {
   OverwriteWarning,
   PreviewSummary,
@@ -36,38 +40,93 @@ interface UpdateSkillDialogProps {
   onOpenChange: (open: boolean) => void
 }
 
-/** Confirm a single-skill update, with a preview of what `skills update` would change. */
+/**
+ * Confirm a single-skill update, with a preview of what `skills update` would change.
+ * Other skills from the same source that are deleted upstream are listed to be removed
+ * too. When the skill itself is deleted upstream (flagged by the check, or its preview
+ * says 409 not_upstream), the dialog becomes a "Remove deleted skill" confirmation.
+ */
 export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null)
   const projects = useScopes().data?.projects
-  const preview = useUpdatePreview(skill.id, open)
+  const status = useUpdates().data
+  const cliName = cliNameOf(skill)
+  // A skill the check already found deleted needs no upstream fetch.
+  const preview = useUpdatePreview(skill.id, open && !skill.deletedUpstream)
   const update = useJobMutation(api.runUpdate)
+  const runningTargets = useRunningUpdates()
   // A preview taken while an update of this skill runs predates that update.
-  const running = useIsBeingUpdated(skill.scope, skill.name)
+  const running = isBeingUpdated(runningTargets, skill.scope, cliName)
 
   const data = preview.data
   const failure = preview.isError ? previewFailure(preview.error) : null
+  const selfDeleted = !!skill.deletedUpstream || !!failure?.deletedUpstream
   const scopeName = scopeLabel(skill.scope, projects)
+
+  const self: UpstreamSkillRef = { scope: skill.scope, name: cliName, source: cliSourceOf(skill) ?? "" }
+  const sameSourceDeleted = deletedInScope(status, skill.scope).filter(
+    (item) => sameSource(item, skill) && item.name.toLowerCase() !== cliName.toLowerCase()
+  )
+  const deletedItems = selfDeleted ? [self, ...sameSourceDeleted] : sameSourceDeleted
+  const choices = useDeletedChoices(deletedItems, (name) =>
+    isBeingUpdated(runningTargets, skill.scope, name) ? "Running…" : null
+  )
+  const remove = choices.selected
+  const ambiguous = ambiguousInScope(status, skill.scope).filter((item) => sameSource(item, skill))
 
   const confirm = () =>
     update.mutate(
-      { scope: skill.scope, names: [skill.name] },
+      // names empty + remove: the job only removes.
+      { scope: skill.scope, names: selfDeleted ? [] : [cliName], ...(remove.length ? { remove } : {}) },
       {
         onSuccess: ({ jobId }) => {
           onOpenChange(false)
           showJob(jobId)
         },
-        onError: (error) => toast.error(`Could not update ${skill.name}`, { description: errorMessage(error) }),
+        onError: (error) =>
+          toast.error(selfDeleted ? `Could not remove ${skill.name}` : `Could not update ${skill.name}`, {
+            description: errorMessage(error),
+          }),
       }
     )
 
-  const confirmLabel = running
-    ? "Update running…"
-    : failure && !failure.blocking
-      ? "Update without preview"
-      : data?.upToDate
-        ? "Update anyway"
-        : "Update"
+  if (selfDeleted) {
+    return (
+      <UpdateDialogShell open={open} onOpenChange={onOpenChange} initialFocus={cancelRef}>
+        <UpdateDialogHeader
+          title={`Remove deleted skill ${skill.name}?`}
+          description={<SkillMeta skill={skill} scopeName={scopeName} />}
+        />
+        <UpdateDialogBody>
+          <p className="text-sm">
+            <span className="font-medium">{skill.name}</span> is no longer in its source, so skills update skips it
+            and cannot bring it back. Remove the local copy, or keep it as it is.
+          </p>
+          <DeletedUpstreamSection scope={skill.scope} choices={choices} />
+        </UpdateDialogBody>
+        <UpdateDialogFooter>
+          <p className="mr-auto min-w-0 text-xs text-muted-foreground max-md:col-span-2">
+            {running
+              ? "An update of this skill is running. Wait for it to finish."
+              : remove.length
+                ? `Runs skills remove for ${remove.length > 2 ? plural(remove.length, "skill") : remove.join(", ")}.`
+                : "Nothing selected: every skill is kept."}
+          </p>
+          <Button ref={cancelRef} variant="outline" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button variant="destructive" disabled={remove.length === 0 || update.isPending || running} onClick={confirm}>
+            {update.isPending || running ? <Spinner /> : <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />}
+            {running ? "Running…" : confirmLabel(0, remove.length)}
+          </Button>
+        </UpdateDialogFooter>
+      </UpdateDialogShell>
+    )
+  }
+
+  const baseLabel =
+    failure && !failure.blocking ? "Update without preview" : data?.upToDate ? "Update anyway" : "Update"
+  const updateLabel = running ? "Update running…" : remove.length ? `${baseLabel} · remove ${remove.length}` : baseLabel
 
   return (
     <UpdateDialogShell open={open} onOpenChange={onOpenChange} initialFocus={cancelRef}>
@@ -85,15 +144,21 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
         ) : (
           <PreviewDetails preview={preview.data} />
         )}
+        <DeletedUpstreamSection scope={skill.scope} choices={choices} />
+        <AmbiguousUpstreamNote items={ambiguous} />
       </UpdateDialogBody>
       <UpdateDialogFooter>
         {running ? (
           <p className="mr-auto min-w-0 text-xs text-muted-foreground max-md:col-span-2">
             An update of this skill is running. Wait for it to finish.
           </p>
+        ) : failure?.blocking ? (
+          <p className="mr-auto min-w-0 text-xs text-destructive max-md:col-span-2">Update is off for this skill.</p>
         ) : (
-          failure?.blocking && (
-            <p className="mr-auto min-w-0 text-xs text-destructive max-md:col-span-2">Update is off for this skill.</p>
+          remove.length > 0 && (
+            <p className="mr-auto min-w-0 text-xs text-muted-foreground max-md:col-span-2">
+              Then removes {remove.length > 2 ? plural(remove.length, "skill") : remove.join(", ")}.
+            </p>
           )
         )}
         <Button ref={cancelRef} variant="outline" onClick={() => onOpenChange(false)}>
@@ -105,7 +170,7 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
           onClick={confirm}
         >
           {update.isPending || running ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
-          {confirmLabel}
+          {updateLabel}
         </Button>
       </UpdateDialogFooter>
     </UpdateDialogShell>

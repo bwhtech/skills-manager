@@ -17,7 +17,17 @@ export function updateRoutes(svc: Services): Hono {
     if (req.names !== undefined && !Array.isArray(req.names))
       throw badRequest("names must be an array")
     const names = req.names?.length ? requireSkillNames(req.names, "names") : []
-    const job = svc.actions.update({ scope, names })
+    if (req.remove !== undefined && !Array.isArray(req.remove))
+      throw badRequest("remove must be an array")
+    const remove = req.remove?.length
+      ? requireSkillNames(req.remove, "remove")
+      : []
+    const notDeleted = remove.filter((name) => !svc.updates.isDeleted(scope, name))
+    if (notDeleted.length)
+      throw badRequest(
+        `Not deleted upstream in this scope: ${notDeleted.join(", ")}. Only skills in deletedUpstream can be removed here.`
+      )
+    const job = svc.actions.update({ scope, names, remove })
     const body: JobRef = { jobId: job.id }
     return c.json(body, 202)
   })

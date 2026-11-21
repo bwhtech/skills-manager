@@ -89,7 +89,13 @@ export interface SkillSource {
 
 export interface SkillSummary {
   id: string // encodeId(realPath)
-  name: string // frontmatter name, else folder name
+  name: string // frontmatter name, else folder name; for display only
+  /**
+   * npx skills: the name the skills CLI tracks (the lock key). It can differ from `name`
+   * when the frontmatter name differs from the lock key or folder. Use it for update,
+   * remove, preview and every match against UpdateStatus or running jobs.
+   */
+  cliName?: string
   description: string // frontmatter description, "" if missing
   realPath: string // resolved skill folder
   /** every place this folder appears (symlinks included), absolute */
@@ -112,6 +118,12 @@ export interface SkillSummary {
   source?: SkillSource // origin === "npx"
   pluginName?: string // origin === "plugin"
   updateAvailable: boolean // from the last update check
+  /**
+   * npx skills: the last update check (or an update job, or a preview) found the skill
+   * deleted upstream. `skills update` skips it; see UpdateStatus.deletedUpstream.
+   * updateAvailable is then false.
+   */
+  deletedUpstream?: boolean
 }
 
 // GET /api/skills?scope=<ScopeKey>  -> SkillSummary[]
@@ -143,7 +155,8 @@ export interface FileContent {
 //   403 if the skill is not editable. 409 SaveConflict if the file on disk no longer
 //   has baseHash (compared under a per-file lock keyed by the canonical path).
 // DELETE /api/skills/:id                 -> JobRef
-//   npx skills: runs `skills remove -s <name> -y` (+ -g for user scope, cwd = project).
+//   npx skills: runs `skills remove -s <cliName> -y` (+ -g for user scope, cwd = project).
+//   On success the skill leaves UpdateStatus.deletedUpstream.
 //   manual skills: the server deletes the folder itself (job logs what it did).
 //   403 for plugin, synced, system, and for skills with removable: false.
 
@@ -199,11 +212,37 @@ export interface SaveInstructionRequest extends SaveRequest {
 
 // ---------- Updates ----------
 
+/** A locked skill that the skills CLI reports for one upstream source. */
+export interface UpstreamSkillRef {
+  scope: ScopeKey
+  /** the CLI name (lock key) */
+  name: string
+  /** as the CLI prints it: owner/repo (user scope) or the lock's sourceUrl (project scope) */
+  source: string
+}
+
 export interface UpdateStatus {
   checking: boolean
   checkedAt: string | null // ISO
-  /** skill names with an update, per scope */
+  /** skill names with an update, per scope; never a deletedUpstream skill */
   available: { scope: ScopeKey; name: string }[]
+  /**
+   * Skills that are gone from their source ("appear to have been deleted upstream", or
+   * "is no longer in this download"). `skills update` skips them and, run non-interactively,
+   * never deletes them; UpdateRunRequest.remove does. From the last check, plus what update
+   * jobs and previews found since.
+   */
+  deletedUpstream?: UpstreamSkillRef[]
+  /**
+   * "Multiple current paths match": several upstream skills match the name, so the CLI skips
+   * them. Show as a warning only; never offer to delete them.
+   */
+  ambiguousUpstream?: UpstreamSkillRef[]
+  /**
+   * Scopes whose last check did not finish cleanly (timed out, failed sources, odd exit).
+   * Only a scope that is checked and not listed here is "up to date".
+   */
+  scopeErrors?: { scope: ScopeKey; error: string }[]
   /** summary of failed checks, e.g. "user scope: 2 sources could not be checked" */
   error: string | null
   /**
@@ -222,10 +261,17 @@ export interface UpdateStatus {
 //   When the job succeeds, the server drops its (scope, name) pairs from UpdateStatus.available
 //   at once (names omitted: every name in the scope), so the skill list stops flagging them.
 //   Whatever the outcome, it then re-runs the check in the background.
+//   remove: deleted-upstream skills to remove after the update, in the same job: a second step
+//   `skills remove -s <remove...> -y` (+ -g for user, cwd = project). 400 unless every name is in
+//   UpdateStatus.deletedUpstream for that scope. The step is skipped when the update step fails.
+//   On success the names leave deletedUpstream at once. With remove set and names omitted or
+//   empty, the job only removes (no update step). Overlap (409) counts names and remove together.
 
 export interface UpdateRunRequest {
   scope: ScopeKey
-  names?: string[] // omitted = all in that scope
+  names?: string[] // omitted = all in that scope (unless remove is set: then none)
+  /** CLI names from UpdateStatus.deletedUpstream (this scope) to remove after the update */
+  remove?: string[]
 }
 
 // GET /api/skills/:id/update-preview -> UpdatePreview
@@ -233,6 +279,8 @@ export interface UpdateRunRequest {
 //   disk now, including any local edits) with the version `skills update` would install.
 //   400 when `skills update` cannot update the skill (e.g. local or legacy lock entries),
 //   409 when the update would fail (skill deleted, moved ambiguously or renamed upstream),
+//   error "not_upstream" for a deleted skill: the server then also adds it to
+//   UpdateStatus.deletedUpstream, so UpdateRunRequest.remove accepts it,
 //   502 when the source could not be fetched, 504 when the fetch timed out.
 //   413 (error "preview_too_large", detail "Preview too large: ...") when a limit is passed,
 //   instead of a partial preview: more than 2,000 files in the local or the upstream skill
@@ -325,8 +373,13 @@ export interface Job {
   startedAt: string
   endedAt: string | null
   log: string[] // output lines, ANSI stripped; stdout and stderr merged
-  /** update jobs only: what they update (names empty = every skill in the scope) */
+  /**
+   * update jobs only: what they update (names empty = every skill in the scope). A job with
+   * a remove step lists the removed names here too, so overlapping runs are refused.
+   */
   update?: UpdateTarget
+  /** jobs from UpdateRunRequest.remove: the deleted-upstream names their remove step removes */
+  remove?: string[]
 }
 
 export interface UpdateTarget {

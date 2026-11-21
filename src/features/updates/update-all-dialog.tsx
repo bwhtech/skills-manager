@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type RefObject } from "react"
 import { useQueries, type UseQueryResult } from "@tanstack/react-query"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { Alert02Icon, ArrowRight01Icon, CircleArrowUp02Icon } from "@hugeicons/core-free-icons"
+import { Alert02Icon, ArrowRight01Icon, CircleArrowUp02Icon, Delete02Icon } from "@hugeicons/core-free-icons"
 import { toast } from "sonner"
 import type { ScopeKey, SkillSummary, UpdatePreview } from "@shared/api"
 import { Button } from "@/components/ui/button"
@@ -23,8 +23,10 @@ import {
 } from "@/lib/api"
 import { plural, scopeLabel } from "@/lib/format"
 import { ui, useUi } from "@/lib/ui-store"
+import { ambiguousInScope, deletedInScope, skillForCliName } from "@/lib/upstream"
 import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
+import { AmbiguousUpstreamNote, confirmLabel, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "./file-changes"
 import { LineCounts, OverwriteWarning, overwritesFiles, summaryText } from "./preview-parts"
 import { PreviewError, PreviewLoading, TOO_LARGE_LABEL, UpToDateNote } from "./preview-states"
@@ -60,35 +62,39 @@ interface Row {
 }
 
 /**
- * One row per skill name with an update. The CLI updates by name; when a name
- * has several folders (e.g. ~/.agents/skills and ~/.claude/skills copies), the
- * preview uses the .agents/skills one, where the CLI installs.
+ * One row per skill name with an update. The CLI updates by its own name (the lock
+ * key), which can differ from the display name, so rows match on cliName. When a name
+ * has several folders, the preview uses the .agents/skills one (see skillForCliName).
  */
 function useRows(scope: ScopeKey) {
   const status = useUpdates().data
   const skills = useSkills(scope)
   const rows = useMemo<Row[]>(() => {
     const names = [...new Set(status?.available.filter((item) => item.scope === scope).map((item) => item.name))]
-    const owned = (skills.data ?? []).filter((skill) => skill.scope === scope && skill.origin === "npx")
-    return names.map((name) => {
-      const matches = owned.filter((skill) => skill.name === name)
-      const skill = matches.find((match) => match.realPath.includes("/.agents/skills/")) ?? matches[0] ?? null
-      return { name, skill }
-    })
+    return names.map((name) => ({ name, skill: skillForCliName(skills.data, scope, name) }))
   }, [status, skills.data, scope])
-  return { rows, loading: !status || skills.isPending }
+  return {
+    rows,
+    deleted: deletedInScope(status, scope),
+    ambiguous: ambiguousInScope(status, scope),
+    loading: !status || skills.isPending,
+  }
 }
 
 function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefObject<HTMLButtonElement | null> }) {
   const projects = useScopes().data?.projects
   const scopeName = scopeLabel(scope, projects)
-  const { rows, loading } = useRows(scope)
+  const { rows, deleted, ambiguous, loading } = useRows(scope)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [loadAll, setLoadAll] = useState(false)
   /** the user's own choices; rows without one follow their default */
   const [choices, setChoices] = useState<ReadonlyMap<string, boolean>>(new Map())
   const run = useJobMutation(api.runUpdate)
   const running = useRunningUpdates()
+  const deletedChoices = useDeletedChoices(deleted, (name) =>
+    isBeingUpdated(running, scope, name) ? "Running…" : null
+  )
+  const remove = deletedChoices.selected
 
   // Fetch a row's preview only once it is expanded (or on "Load all summaries");
   // the shared limiter keeps 3 fetches in flight at most.
@@ -132,9 +138,10 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
   const confirm = () => {
     // Checked again here: a blocked row must never be sent, whatever the checkboxes said.
     const names = rows.filter((row, index) => !blockReason(row, index) && isChecked(row, index)).map((row) => row.name)
-    if (names.length === 0) return
+    if (names.length === 0 && remove.length === 0) return
     run.mutate(
-      { scope, names },
+      // names empty + remove: the job only removes.
+      { scope, names, ...(remove.length ? { remove } : {}) },
       {
         onSuccess: ({ jobId }) => {
           ui.closeUpdateAll()
@@ -148,11 +155,23 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
   return (
     <>
       <UpdateDialogHeader
-        title={rows.length ? `Update ${plural(rows.length, "skill")} in ${scopeName}?` : `Update skills in ${scopeName}`}
-        description="Pick the skills to update. Expand a skill to see what changes before you confirm."
+        title={
+          rows.length
+            ? `Update ${plural(rows.length, "skill")} in ${scopeName}?`
+            : deleted.length
+              ? `Remove ${plural(deleted.length, "deleted skill")} in ${scopeName}?`
+              : `Update skills in ${scopeName}`
+        }
+        description={
+          deleted.length && !rows.length
+            ? "These skills are gone from their source. Untick a skill to keep it."
+            : "Pick the skills to update. Expand a skill to see what changes before you confirm."
+        }
       />
       <UpdateDialogBody>
-        <OverwriteWarning detail="Each selected skill is replaced with its upstream version: modified files are overwritten and files that upstream removed are deleted." />
+        {(rows.length > 0 || loading) && (
+          <OverwriteWarning detail="Each selected skill is replaced with its upstream version: modified files are overwritten and files that upstream removed are deleted." />
+        )}
         {loading ? (
           <div className="flex flex-col gap-2">
             <Skeleton className="h-11 rounded-2xl" />
@@ -160,7 +179,7 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
             <Skeleton className="h-11 rounded-2xl" />
           </div>
         ) : rows.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No updates available in {scopeName}.</p>
+          deleted.length === 0 && <p className="text-sm text-muted-foreground">No updates available in {scopeName}.</p>
         ) : (
           <>
             <div className="flex flex-wrap items-center gap-2">
@@ -212,17 +231,34 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
             </ul>
           </>
         )}
+        {!loading && <DeletedUpstreamSection scope={scope} choices={deletedChoices} />}
+        {!loading && <AmbiguousUpstreamNote items={ambiguous} />}
       </UpdateDialogBody>
       <UpdateDialogFooter>
         <p className="mr-auto min-w-0 truncate text-xs text-muted-foreground max-md:col-span-2 max-md:mr-0">
-          {selected.length ? `${plural(selected.length, "skill")} will be updated` : "No skills selected."}
+          {selected.length || remove.length
+            ? [
+                selected.length && `${plural(selected.length, "skill")} will be updated`,
+                remove.length && `${remove.length} removed`,
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            : "No skills selected."}
         </p>
         <Button ref={cancelRef} variant="outline" onClick={() => ui.closeUpdateAll()}>
           Cancel
         </Button>
-        <Button disabled={selected.length === 0 || run.isPending} onClick={confirm}>
-          {run.isPending ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
-          {selected.length ? `Update ${plural(selected.length, "skill")}` : "Update"}
+        <Button
+          variant={selected.length === 0 && remove.length ? "destructive" : "default"}
+          disabled={(selected.length === 0 && remove.length === 0) || run.isPending}
+          onClick={confirm}
+        >
+          {run.isPending ? (
+            <Spinner />
+          ) : (
+            <HugeiconsIcon icon={selected.length === 0 && remove.length ? Delete02Icon : CircleArrowUp02Icon} strokeWidth={2} />
+          )}
+          {confirmLabel(selected.length, remove.length)}
         </Button>
       </UpdateDialogFooter>
     </>
