@@ -125,7 +125,7 @@ export class RemovalJournal {
         return
       }
       await mkdir(this.dir, { recursive: true, mode: 0o700 })
-      await atomicWrite(this.file, JSON.stringify(this.data, null, 2) + "\n", 0o600)
+      await atomicWrite(this.file, JSON.stringify(this.data, null, 2) + "\n", 0o600, { durable: true })
     })
     this.queue = next.catch(() => {})
     return next

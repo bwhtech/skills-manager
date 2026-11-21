@@ -8,6 +8,7 @@ import {
   writeFile,
   unlink,
   chmod,
+  open,
 } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
 import type {
@@ -100,10 +101,16 @@ export async function withPathLock<T>(
   }
 }
 
+/**
+ * Writes via a temp file and rename. `durable` also fsyncs the temp file before the rename
+ * and the parent directory after it, so the new content survives power loss, not only a
+ * crash of this process (used for the removal journal, which must be on disk before a delete).
+ */
 export async function atomicWrite(
   target: string,
   content: string,
-  mode = 0o644
+  mode = 0o644,
+  options: { durable?: boolean } = {}
 ): Promise<number> {
   const temp = join(
     dirname(target),
@@ -112,12 +119,23 @@ export async function atomicWrite(
   try {
     await writeFile(temp, content, { flag: "wx", mode })
     await chmod(temp, mode)
+    if (options.durable) await fsyncPath(temp)
     await rename(temp, target)
+    if (options.durable) await fsyncPath(dirname(target))
   } catch (err) {
     await unlink(temp).catch(() => {})
     throw err
   }
   return (await stat(target)).mtimeMs
+}
+
+async function fsyncPath(path: string): Promise<void> {
+  const handle = await open(path, "r")
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
 }
 
 export interface LinkInfo {

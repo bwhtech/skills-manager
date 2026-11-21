@@ -214,8 +214,10 @@ export async function purgeStaged(
   staged: StagedCopy,
   home: string,
   log: JobLog,
-  journal?: RemovalJournal
+  journal: RemovalJournal
 ): Promise<"deleted" | "kept" | "purge_failed"> {
+  // The journal is required: a delete is never started without a durable "purging" record.
+  if (!journal) throw new Error("purgeStaged needs the removal journal")
   const real = await checkTrashed(staged.placement, staged.trashed, staged, home)
   if (!real) {
     await note(journal, staged.trashed, "staged", "its trash dir changed, so it was not deleted")
