@@ -726,6 +726,7 @@ export interface UpdateTarget {
  * instruction: a discovered instruction file (a link to one is found by its target too).
  * file: any other regular text file under HOME or /mnt/data; path is absolute, as resolved
  *   from the written path (symlinks not followed, for display); /api/file checks its real path.
+ *   Markdown files open editable in the viewer (PUT /api/file), others read-only.
  */
 export type OpenResult =
   | { kind: "skill-file"; skillId: string; file: string; scope: ScopeKey; scopes: ScopeKey[]; line?: number }
@@ -739,7 +740,21 @@ export type OpenResult =
 //   (a file the viewer shows). Without `from`, relative paths are 400.
 //   404 (missing, a directory, outside HOME and /mnt/data), 403 (a secret-looking path:
 //   "Not shown: looks like a secret file"), 415 (binary), 413 (over 1 MB). The real path counts.
-// GET /api/file?path=<abs>  -> FileContent  (read-only; the same checks as /api/open)
+// GET /api/file?path=<abs>  -> ViewedFileContent  (the same checks as /api/open)
+// PUT /api/file?path=<abs>  SaveRequest -> SaveResponse
+//   Saves an existing regular Markdown file: the name as asked and the real name end in .md
+//   (any case). Writes the real path, so a symlink keeps pointing at its target; the file
+//   mode stays. The same checks as GET, on the asked and the real path, except that a real
+//   path outside HOME and /mnt/data is 403 here. 403 read_only ("Only Markdown files can be
+//   edited here") for any other file; no file is ever created (404 when missing). 409
+//   SaveConflict if the file no longer has baseHash, 409 moved if the path now leads to
+//   another real file (both checked under the per-file save lock).
+
+/** A file the viewer shows. */
+export interface ViewedFileContent extends FileContent {
+  /** a Markdown file this server may save (PUT /api/file): else the viewer is read-only */
+  editable: boolean
+}
 
 // ---------- Helpers ----------
 

@@ -3,7 +3,7 @@ import { config } from "./config.ts"
 import { handleError } from "./lib/errors.ts"
 import { hostGuard, mutationGuard } from "./lib/security.ts"
 import { agentRoutes } from "./routes/agents.ts"
-import { fileRoutes } from "./routes/files.ts"
+import { type FileRoots, fileRoutes } from "./routes/files.ts"
 import { installRoutes } from "./routes/install.ts"
 import { instructionRoutes } from "./routes/instructions.ts"
 import { jobRoutes } from "./routes/jobs.ts"
@@ -13,8 +13,13 @@ import { skillRoutes } from "./routes/skills.ts"
 import { updateRoutes } from "./routes/updates.ts"
 import type { Services } from "./services.ts"
 
+export interface ApiOptions {
+  /** tests: where /api/open and /api/file look, instead of HOME and /mnt/data */
+  fileRoots?: FileRoots
+}
+
 /** The /api app. */
-export function createApi(svc: Services): Hono {
+export function createApi(svc: Services, options: ApiOptions = {}): Hono {
   const api = new Hono()
   api.use("*", hostGuard(config.allowedHosts))
   api.use("*", mutationGuard)
@@ -29,10 +34,10 @@ export function createApi(svc: Services): Hono {
     installRoutes,
     jobRoutes,
     recoveryRoutes,
-    fileRoutes,
   ]) {
     api.route("/", routes(svc))
   }
+  api.route("/", fileRoutes(svc, options.fileRoots))
   api.all("*", (c) =>
     c.json(
       { error: "not_found", detail: `No route ${c.req.method} ${c.req.path}` },

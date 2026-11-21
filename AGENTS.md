@@ -68,7 +68,10 @@ to install, update and remove skills.
 - Run the skills CLI non-interactively: `-y`, stdin not a TTY, env `DISABLE_TELEMETRY=1`
   and `DO_NOT_TRACK=1`, `NO_COLOR=1`. Use argument arrays (`Bun.spawn([...])`), never a shell string.
 - Never write outside paths the server discovered itself (skill `SKILL.md` files of editable
-  skills, and known instruction file paths).
+  skills, and known instruction file paths). One exception: the file viewer (`PUT /api/file`)
+  saves an existing Markdown file (`.md`) under HOME or `/mnt/data` that a document links to,
+  with the same secret deny list and checks as `GET /api/file`. It never creates a file, and
+  other file types stay read-only.
 - Mutating requests need header `X-Skills-Manager: 1` and a same-origin `Origin`.
 - Every `/api` request must name an allowed host, against DNS rebinding (403 `bad_host`).
   `localhost`, `127.0.0.1` and `[::1]` are always allowed, on any port. The other allowed host

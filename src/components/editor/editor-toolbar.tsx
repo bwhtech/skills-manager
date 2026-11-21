@@ -15,6 +15,8 @@ export const modKey = isMac ? "⌘" : "Ctrl"
 
 interface EditorToolbarProps {
   title: string
+  /** false: the surrounding header shows the title and the dirty dot */
+  showTitle?: boolean
   dirty: boolean
   meta?: ReactNode
   readOnlyReason?: string
@@ -28,15 +30,17 @@ interface EditorToolbarProps {
 }
 
 export function EditorToolbar(props: EditorToolbarProps) {
-  const { title, dirty, meta, readOnlyReason, mode, onModeChange, allowSplit, canSave, saving, onSave } = props
+  const { title, showTitle = true, dirty, meta, readOnlyReason, mode, onModeChange, allowSplit, canSave, saving, onSave } = props
   return (
     // Phones: the screen bar shows the title. Touch (also a landscape phone in
     // the panel layout): the row scrolls sideways rather than overflow.
     <div className="flex h-11 shrink-0 items-center gap-2 border-b px-3 max-md:overflow-x-auto max-md:overscroll-x-contain max-md:[scrollbar-width:none] pointer-coarse:h-13 pointer-coarse:overflow-x-auto pointer-coarse:overscroll-x-contain pointer-coarse:[scrollbar-width:none]">
-      <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium max-md:hidden">
-        <span className="truncate">{title}</span>
-        <DirtyDot dirty={dirty} />
-      </span>
+      {showTitle && (
+        <span className="flex min-w-0 items-center gap-1.5 text-sm font-medium max-md:hidden">
+          <span className="truncate">{title}</span>
+          <DirtyDot dirty={dirty} />
+        </span>
+      )}
       {readOnlyReason && <LockBadge reason={readOnlyReason} />}
       {meta}
       <div className="ml-auto flex shrink-0 items-center gap-2">

@@ -1,15 +1,25 @@
 import { Hono } from "hono"
-import type { FileContent, OpenResult } from "../../shared/api.ts"
+import type { OpenResult, SaveRequest, SaveResponse, ViewedFileContent } from "../../shared/api.ts"
 import { config } from "../config.ts"
 import { PathOpener } from "../discovery/open-path.ts"
+import { readJson } from "../lib/errors.ts"
 import type { Services } from "../services.ts"
 
-/** Paths written in documents: where they lead, and a read-only view of plain files. */
-export function fileRoutes(svc: Services): Hono {
+/** HOME, and the folders whose files may be shown (and Markdown files saved). */
+export interface FileRoots {
+  home: string
+  roots: string[]
+}
+
+function defaultFileRoots(): FileRoots {
+  return { home: config.home, roots: [config.home, "/mnt/data"] }
+}
+
+/** Paths written in documents: where they lead, and a view of plain files (Markdown ones editable). */
+export function fileRoutes(svc: Services, where: FileRoots = defaultFileRoots()): Hono {
   const app = new Hono()
   const opener = new PathOpener({
-    home: config.home,
-    roots: [config.home, "/mnt/data"],
+    ...where,
     skills: () => svc.skills.all(),
     instructions: svc.instructions,
   })
@@ -20,7 +30,12 @@ export function fileRoutes(svc: Services): Hono {
   })
 
   app.get("/file", async (c) => {
-    const body: FileContent = await opener.read(c.req.query("path"))
+    const body: ViewedFileContent = await opener.read(c.req.query("path"))
+    return c.json(body)
+  })
+
+  app.put("/file", async (c) => {
+    const body: SaveResponse = await opener.save(c.req.query("path"), await readJson<SaveRequest>(c))
     return c.json(body)
   })
 

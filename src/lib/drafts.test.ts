@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import {
   beginSave,
+  discardDraft,
   discardDrafts,
   editDraft,
   failSave,
@@ -57,6 +58,21 @@ describe("suspended drafts (layout switch)", () => {
     discardDrafts()
     expect(getDraft(KEY)?.content).toBe(v1.content)
     expect(hasDirtyDrafts()).toBe(false)
+  })
+
+  test("discarding one document leaves the others' edits", () => {
+    const VIEWER = "file:/home/u/setup.md"
+    mount(v1)
+    editDraft(KEY, "main edit\n")
+    const viewer = mount(v2, VIEWER)
+    editDraft(VIEWER, "viewer edit\n")
+    discardDraft(VIEWER)
+    expect(getDraft(VIEWER)?.content).toBe(v2.content)
+    expect(getDraft(KEY)?.content).toBe("main edit\n")
+    expect(hasDirtyDrafts()).toBe(true)
+    // Closed after the discard: forgotten, the next open starts from the disk.
+    viewer.release()
+    expect(getDraft(VIEWER)).toBeUndefined()
   })
 
   test("a clean document is forgotten once no editor shows it", () => {

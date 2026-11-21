@@ -4,9 +4,9 @@ import type { ScopeKey } from "@shared/api"
 // App-wide UI state that several unrelated components open or read:
 // the jobs drawer, the install dialog, the Update all dialog and the file viewer.
 
-/** A plain file a document linked to, shown read-only. */
+/** A plain file a document linked to, shown in the file viewer. */
 export interface ViewedFile {
-  /** absolute real path */
+  /** absolute path, as resolved from the link (GET /api/open) */
   path: string
   line?: number
 }
@@ -43,6 +43,11 @@ export function useUi() {
   return useSyncExternalStore(subscribe, () => state)
 }
 
+/** The current state, outside React. */
+export function getUi(): UiState {
+  return state
+}
+
 export const ui = {
   openJobs: (jobId?: string) =>
     set({ jobsOpen: true, selectedJobId: jobId ?? state.selectedJobId }),
@@ -51,6 +56,7 @@ export const ui = {
   setInstallOpen: (open: boolean) => set({ installOpen: open }),
   openUpdateAll: (scope: ScopeKey) => set({ updateAllScope: scope }),
   closeUpdateAll: () => set({ updateAllScope: null }),
+  /** Raw: features/open closes and replaces the viewer through its unsaved-changes guard. */
   viewFile: (file: ViewedFile) => set({ viewedFile: file }),
   closeFile: () => set({ viewedFile: null }),
 }

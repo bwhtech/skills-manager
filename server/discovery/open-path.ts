@@ -1,8 +1,9 @@
-import { stat } from "node:fs/promises"
+import { constants } from "node:fs"
+import { access, stat } from "node:fs/promises"
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path"
-import type { FileContent, OpenResult } from "../../shared/api.ts"
+import type { OpenResult, SaveRequest, SaveResponse, ViewedFileContent } from "../../shared/api.ts"
 import { HttpError, badRequest, forbidden, notFound } from "../lib/errors.ts"
-import { MAX_TEXT_BYTES, isInside, readTextFile, realpathOrNull } from "../lib/files.ts"
+import { MAX_TEXT_BYTES, isInside, readTextFile, realpathOrNull, saveTextFile } from "../lib/files.ts"
 import { SECRET_REFUSAL, looksSecret } from "../lib/secret-paths.ts"
 import { decodePathId, requireRelativePath } from "../lib/validate.ts"
 import type { InstructionService } from "./instructions.ts"
@@ -23,6 +24,10 @@ export interface OpenDeps {
 const SYSTEM_DIRS = ["/proc", "/dev", "/sys"]
 const LINE_SUFFIX = /:(\d+)(?::\d+)?$/
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i
+const MARKDOWN = /\.md$/i
+
+export const READ_ONLY_REFUSAL = "Only Markdown files can be edited here"
+const OUTSIDE = "Only files under HOME and /mnt/data can be opened"
 
 /** Strips a Markdown anchor (#section) and a trailing :line or :line:col. */
 export function parseRawPath(raw: string): { path: string; line?: number } {
@@ -35,7 +40,10 @@ export function parseRawPath(raw: string): { path: string; line?: number } {
   return { path: path.slice(0, match.index), ...(line > 0 ? { line } : {}) }
 }
 
-/** Resolves paths written in documents to something the UI can open. Read-only. */
+/**
+ * Resolves paths written in documents to something the UI can open, and shows
+ * those files. Of the plain files, only existing Markdown files can be saved.
+ */
 export class PathOpener {
   private realRoots: Promise<string[]> | null = null
 
@@ -64,11 +72,26 @@ export class PathOpener {
     return { kind: "file", path: absolute, ...at }
   }
 
-  /** A regular text file by absolute path, read-only. */
-  async read(rawPath: unknown): Promise<FileContent> {
-    if (typeof rawPath !== "string" || !isAbsolute(rawPath) || rawPath.includes("\0"))
-      throw badRequest("path must be absolute")
-    return readTextFile(await this.checkedFile(normalize(rawPath)))
+  /** A regular text file by absolute path; `editable` for Markdown files the server may write. */
+  async read(rawPath: unknown): Promise<ViewedFileContent> {
+    const path = requireAbsolute(rawPath)
+    const real = await this.checkedFile(path)
+    return { ...(await readTextFile(real)), editable: await isWritableMarkdown(path, real) }
+  }
+
+  /**
+   * Saves an existing Markdown file (by the name asked and the real name). Writes the real
+   * path, so a symlink keeps pointing at the file it wrote. Under the save lock the checks
+   * run again: the path must still lead to the same real file.
+   */
+  async save(rawPath: unknown, req: SaveRequest): Promise<SaveResponse> {
+    const path = requireAbsolute(rawPath)
+    const real = await this.checkedFile(path, { outside: () => forbidden("Only files under HOME and /mnt/data can be edited") })
+    if (!MARKDOWN.test(path) || !MARKDOWN.test(real)) throw new HttpError(403, "read_only", READ_ONLY_REFUSAL)
+    const guard = async () => {
+      if ((await this.checkedFile(path)) !== real) throw new HttpError(409, "moved", "The file was moved or replaced; reload it")
+    }
+    return saveTextFile(real, req, { guard })
   }
 
   private async absolute(path: string, from: unknown): Promise<string> {
@@ -90,8 +113,11 @@ export class PathOpener {
     return dirname(join(skill.realPath, file))
   }
 
-  /** The real path of a showable text file, or the HttpError that says why not. */
-  private async checkedFile(path: string): Promise<string> {
+  /**
+   * The real path of a showable text file, or the HttpError that says why not.
+   * `outside` makes the error for a real path outside the roots (default 404).
+   */
+  private async checkedFile(path: string, options: { outside?: () => HttpError } = {}): Promise<string> {
     const roots = await this.roots()
     const secret = (p: string) => [this.deps.home, ...roots].some((home) => looksSecret(p, home))
     // The asked path first, so a refusal does not tell whether a secret file exists.
@@ -99,7 +125,7 @@ export class PathOpener {
     const real = await realpathOrNull(path)
     if (!real) throw notFound(`No such file: ${path}`)
     if (SYSTEM_DIRS.some((dir) => isInside(dir, real)) || !roots.some((root) => isInside(root, real)))
-      throw notFound("Only files under HOME and /mnt/data can be opened")
+      throw options.outside?.() ?? notFound(OUTSIDE)
     if (secret(real)) throw forbidden(SECRET_REFUSAL)
     const info = await stat(real)
     if (!info.isFile()) throw notFound(`Not a file: ${path}`)
@@ -114,4 +140,18 @@ export class PathOpener {
     )
     return this.realRoots
   }
+}
+
+function requireAbsolute(rawPath: unknown): string {
+  if (typeof rawPath !== "string" || !isAbsolute(rawPath) || rawPath.includes("\0"))
+    throw badRequest("path must be absolute")
+  return normalize(rawPath)
+}
+
+/** A Markdown file (asked and real name) that this process can write, in place. */
+async function isWritableMarkdown(path: string, real: string): Promise<boolean> {
+  if (!MARKDOWN.test(path) || !MARKDOWN.test(real)) return false
+  // The save writes a temp file next to the file, then renames it over it.
+  const writable = (p: string) => access(p, constants.W_OK).then(() => true, () => false)
+  return (await writable(real)) && (await writable(dirname(real)))
 }

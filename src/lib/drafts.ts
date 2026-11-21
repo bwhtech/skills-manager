@@ -253,15 +253,24 @@ export function setDraftConflict(key: string, conflict: boolean) {
  */
 export function discardDrafts() {
   let changed = false
-  for (const [key, entry] of [...entries]) {
-    const clean = entry.saving ? entry.saving.content : entry.base.content
-    if (entry.content === clean && !entry.conflict) continue
-    changed = true
-    const next = { ...entry, content: clean, conflict: false }
-    if (next.mounts <= 0 && !next.saving) entries.delete(key)
-    else entries.set(key, next)
-  }
+  for (const key of [...entries.keys()]) changed = discardEntry(key) || changed
   if (changed) emit()
+}
+
+/** discardDrafts for one document (closing the file viewer leaves the other documents alone). */
+export function discardDraft(key: string) {
+  if (discardEntry(key)) emit()
+}
+
+function discardEntry(key: string): boolean {
+  const entry = entries.get(key)
+  if (!entry) return false
+  const clean = entry.saving ? entry.saving.content : entry.base.content
+  if (entry.content === clean && !entry.conflict) return false
+  const next = { ...entry, content: clean, conflict: false }
+  if (next.mounts <= 0 && !next.saving) entries.delete(key)
+  else entries.set(key, next)
+  return true
 }
 
 /** For tests. */

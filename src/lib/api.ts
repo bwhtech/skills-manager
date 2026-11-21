@@ -39,6 +39,7 @@ import {
   type UpdateRunRequest,
   type UpdateStatus,
   type UpdateTarget,
+  type ViewedFileContent,
   updateTargetsOverlap,
 } from "@shared/api"
 import { requestGeneration } from "./drafts"
@@ -156,7 +157,13 @@ export const api = {
   deleteCopies: (body: RecoveryRequest) => request<RecoveryResult>("POST", "/api/recovery/delete", body),
 
   open: (path: string, from: string) => request<OpenResult>("GET", `/api/open?${q({ path, from })}`),
-  file: (path: string) => request<FileContent>("GET", `/api/file?${q({ path })}`),
+  file: async (path: string) => {
+    const generation = requestGeneration()
+    const file = await request<ViewedFileContent>("GET", `/api/file?${q({ path })}`)
+    return { ...file, generation }
+  },
+  saveFile: (path: string, body: SaveRequest) =>
+    request<SaveResponse>("PUT", `/api/file?${q({ path })}`, body),
 
   jobs: () => request<Job[]>("GET", "/api/jobs"),
   job: (id: string) => request<Job>("GET", `/api/jobs/${id}`),
@@ -226,7 +233,7 @@ export function useInstruction(id: string | null, exists: boolean) {
   })
 }
 
-/** A plain file a document links to (read-only viewer). */
+/** A plain file a document links to (the file viewer; Markdown files are editable). */
 export function useFile(path: string | null) {
   return useQuery({
     queryKey: keys.file(path ?? ""),

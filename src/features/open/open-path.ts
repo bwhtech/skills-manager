@@ -4,7 +4,8 @@ import { HttpError, api, errorMessage } from "@/lib/api"
 import { getPlace, navigate, subscribePlace, type Place } from "@/lib/hash-state"
 import type { LinkTarget } from "@/lib/path-links"
 import { hasLineEditor, requestLine } from "@/lib/pending-line"
-import { ui } from "@/lib/ui-store"
+import { getUi, ui, type ViewedFile } from "@/lib/ui-store"
+import { confirmDiscard } from "@/lib/unsaved"
 
 /**
  * A document's address for GET /api/open `from` (relative paths start at its folder),
@@ -13,6 +14,34 @@ import { ui } from "@/lib/ui-store"
 export const docAddress = {
   skillFile: (skillId: string, file: string) => `${skillId}:${file}`,
   instruction: (id: string) => id,
+}
+
+/** The draft store key of a file in the viewer (lib/drafts.ts). Its line-request key is the path. */
+export function viewedFileDraftKey(path: string) {
+  return `file:${path}`
+}
+
+/** Close the file viewer (then run `then`), after asking when its file has unsaved edits. */
+export function closeFileViewer(then?: () => void) {
+  const shown = getUi().viewedFile
+  if (!shown) return then?.()
+  confirmDiscard(viewedFileDraftKey(shown.path), () => {
+    ui.closeFile()
+    then?.()
+  })
+}
+
+/** Show a file in the viewer. Replacing another file asks first when that one has unsaved edits. */
+function showFile(next: ViewedFile) {
+  const shown = getUi().viewedFile
+  if (shown?.path === next.path) {
+    // The same file: keep the editor (and its undo history), only move to the line.
+    ui.viewFile(next)
+    if (next.line && hasLineEditor(next.path)) requestLine(next.path, next.line)
+    return
+  }
+  if (!shown) return ui.viewFile(next)
+  confirmDiscard(viewedFileDraftKey(shown.path), () => ui.viewFile(next))
 }
 
 /** Open a link from the document at `from` (a docAddress, or a viewed file's absolute path). */
@@ -34,10 +63,14 @@ async function openPath(raw: string, from: string) {
     return
   }
   if (result.kind === "file") {
-    ui.viewFile({ path: result.path, line: result.line })
+    showFile({ path: result.path, line: result.line })
     return
   }
-  ui.closeFile()
+  closeFileViewer(() => goTo(result))
+}
+
+/** Show a skill file or instruction file in its own editor, at the line. */
+function goTo(result: Exclude<OpenResult, { kind: "file" }>) {
   const { key, place } = destination(result)
   // The document is open already (also SKILL.md at file=null): show the line, no move.
   if (hasLineEditor(key)) {

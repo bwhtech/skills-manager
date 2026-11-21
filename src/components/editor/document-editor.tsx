@@ -58,6 +58,10 @@ export interface DocumentEditorProps {
   onDirtyChange?: (dirty: boolean) => void
   /** this document's docAddress (features/open): paths in it open on Cmd/Ctrl+click */
   openFrom?: string
+  /** 1-based line to show when the editor mounts */
+  initialLine?: number
+  /** false when the surrounding header already shows the title and the dirty dot */
+  toolbarTitle?: boolean
 }
 
 /**
@@ -80,6 +84,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   const viewMode = !markdown ? "edit" : mode === "split" && !isDesktop ? "edit" : mode
   const preview = useDeferredValue(draft)
   const { openFrom } = props
+  const root = useRef<HTMLDivElement>(null)
   const onOpenLink = useCallback(
     (link: LinkTarget) => {
       if (openFrom) openLink(link, openFrom)
@@ -136,6 +141,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   useWindowKeydown((event) => {
     if (isMod(event) && !event.altKey && event.key.toLowerCase() === "s") {
       event.preventDefault()
+      if (!hasKeyboard(root.current)) return
       void save()
     }
   })
@@ -143,9 +149,10 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   const problems = validate ? validate(preview) : []
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div ref={root} className="flex h-full min-h-0 flex-col">
       <EditorToolbar
         title={title}
+        showTitle={props.toolbarTitle !== false}
         dirty={dirty}
         meta={meta}
         readOnlyReason={readOnlyReason}
@@ -174,6 +181,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
           className={viewMode === "preview" ? "hidden" : undefined}
           onOpenLink={openFrom ? onOpenLink : undefined}
           lineKey={openFrom}
+          initialLine={props.initialLine}
         />
         {viewMode !== "edit" && (
           <div
@@ -197,4 +205,15 @@ export default function DocumentEditor(props: DocumentEditorProps) {
       />
     </div>
   )
+}
+
+/**
+ * Whether keyboard shortcuts go to the editor in `root`: not while focus is in a dialog
+ * that does not hold it (the file viewer's editor over the page's editor, a confirm dialog).
+ */
+function hasKeyboard(root: HTMLElement | null): boolean {
+  if (!root) return false
+  const focused = document.activeElement
+  const dialog = focused instanceof HTMLElement ? focused.closest('[role="dialog"], [role="alertdialog"]') : null
+  return !dialog || dialog.contains(root)
 }
