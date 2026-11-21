@@ -34,8 +34,8 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
   const folder = basename(skill.realPath)
   const validate = useCallback((text: string) => validateSkillMd(text, folder), [folder])
 
-  const save = async (content: string, { baseMtimeMs, force }: SaveOptions) => {
-    const result = await api.saveSkillMd(skill.id, { content, baseMtimeMs, force })
+  const save = async (content: string, { baseHash, force }: SaveOptions) => {
+    const result = await api.saveSkillMd(skill.id, { content, baseHash, force })
     void client.invalidateQueries({ queryKey: keys.skill(skill.id) })
     // The skill can be listed in several scopes; refresh every list.
     void client.invalidateQueries({ queryKey: ["skills"] })

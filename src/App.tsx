@@ -55,7 +55,7 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delay={400}>
-        <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen} className="h-svh overflow-hidden">
+        <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen} className="h-dvh overflow-hidden">
           <AppSidebar />
           <SidebarInset className="min-w-0 overflow-hidden">
             <AppHeader />

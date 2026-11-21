@@ -5,12 +5,18 @@ import type {
   InstructionFile,
   InstructionFileName,
   SaveInstructionRequest,
+  SaveResponse,
   ScopeKey,
 } from "../../shared/api.ts"
 import { encodeId } from "../../shared/api.ts"
 import { config } from "../config.ts"
 import { HttpError, notFound } from "../lib/errors.ts"
-import { readTextFile, resolveLink, saveTextFile } from "../lib/files.ts"
+import {
+  contentHash,
+  readTextFile,
+  resolveLink,
+  saveTextFile,
+} from "../lib/files.ts"
 import type { ProjectService } from "./projects.ts"
 
 interface Slot {
@@ -49,7 +55,7 @@ export class InstructionService {
   }
 
   /** Writes to the link target when the file is a symlink. */
-  async save(id: string, req: SaveInstructionRequest): Promise<number> {
+  async save(id: string, req: SaveInstructionRequest): Promise<SaveResponse> {
     const file = await this.find(id)
     const target = file.linkTarget ?? file.path
     if (req.create) {
@@ -100,7 +106,10 @@ async function describe(scope: ScopeKey, slot: Slot): Promise<InstructionFile> {
   return file
 }
 
-async function createFile(target: string, content: unknown): Promise<number> {
+async function createFile(
+  target: string,
+  content: unknown
+): Promise<SaveResponse> {
   if (typeof content !== "string")
     throw new HttpError(400, "bad_request", "content must be a string")
   await mkdir(dirname(target), { recursive: true })
@@ -111,5 +120,5 @@ async function createFile(target: string, content: unknown): Promise<number> {
       throw new HttpError(409, "exists", "The file already exists")
     throw err
   }
-  return (await stat(target)).mtimeMs
+  return { mtimeMs: (await stat(target)).mtimeMs, hash: contentHash(content) }
 }

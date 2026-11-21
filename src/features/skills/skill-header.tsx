@@ -15,7 +15,8 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
   const projects = useScopes().data?.projects
   const alsoIn = skill.scopes.filter((scope) => scope !== viewed).map((scope) => scopeLabel(scope, projects))
   const readOnly = skillReadOnlyReason(skill)
-  const removable = skill.origin === "npx" || skill.origin === "manual"
+  // Manual skills in a project's own skills/ folder show Remove, disabled.
+  const showRemove = skill.origin === "npx" || skill.origin === "manual"
   const updatable = skill.origin === "npx" && skill.updateAvailable
 
   return (
@@ -40,7 +41,7 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
         )}
         <div className="ml-auto flex shrink-0 items-center gap-2">
           {updatable && <UpdateSkillButton skill={skill} />}
-          {removable && <RemoveSkillButton skill={skill} />}
+          {showRemove && <RemoveSkillButton skill={skill} />}
         </div>
       </div>
       <p className="line-clamp-2 text-xs text-muted-foreground" title={skill.description}>

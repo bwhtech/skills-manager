@@ -10,49 +10,75 @@ import {
   chmod,
 } from "node:fs/promises"
 import { basename, dirname, join, resolve } from "node:path"
-import type { FileContent, SaveRequest } from "../../shared/api.ts"
+import type {
+  FileContent,
+  SaveRequest,
+  SaveResponse,
+} from "../../shared/api.ts"
 import { HttpError, badRequest } from "./errors.ts"
 
 export const MAX_TEXT_BYTES = 1024 * 1024
-// Float mtimes can lose precision on the round trip through JSON.
-const MTIME_TOLERANCE_MS = 1
+
+/** sha256 hex of file bytes or of a string's UTF-8 bytes. */
+export function contentHash(data: string | Uint8Array): string {
+  return new Bun.CryptoHasher("sha256").update(data).digest("hex")
+}
 
 export async function readTextFile(path: string): Promise<FileContent> {
   const info = await stat(path)
   if (info.size > MAX_TEXT_BYTES)
     throw new HttpError(413, "too_large", "File is larger than 1 MB")
-  const content = await readFile(path, "utf8")
-  return { content, mtimeMs: info.mtimeMs }
+  const bytes = await readFile(path)
+  return {
+    content: bytes.toString("utf8"),
+    mtimeMs: info.mtimeMs,
+    hash: contentHash(bytes),
+  }
 }
 
 /**
- * Save with an optimistic lock on mtime. Writes atomically: a temp file in
- * the same directory, then rename. Pass the real target, not a symlink.
- * The mtime check and the write run under a per-path lock, so two saves
- * with the same baseMtimeMs cannot both pass the check.
+ * The path a save really writes, so that every alias of one file (a symlink
+ * to it, or a path through a symlinked parent dir) maps to one lock key:
+ * the real path of the file, or of its parent dir plus the basename when the
+ * file is missing.
+ */
+export async function canonicalPath(path: string): Promise<string> {
+  const real = await realpathOrNull(path)
+  if (real) return real
+  return join(await realpath(dirname(path)), basename(path))
+}
+
+/**
+ * Save with an optimistic lock on the content hash. The hash check and the
+ * write run under a per-file lock keyed by the canonical path, so two saves
+ * with the same baseHash cannot both pass, even through different aliases.
+ * Writes atomically: a temp file next to the real file, then rename.
  */
 export async function saveTextFile(
   target: string,
   req: SaveRequest
-): Promise<number> {
+): Promise<SaveResponse> {
   if (typeof req.content !== "string")
     throw badRequest("content must be a string")
   if (Buffer.byteLength(req.content) > MAX_TEXT_BYTES)
     throw new HttpError(413, "too_large", "Content is larger than 1 MB")
-  if (!req.force && typeof req.baseMtimeMs !== "number")
-    throw badRequest("baseMtimeMs is required unless force is set")
+  if (!req.force && typeof req.baseHash !== "string")
+    throw badRequest("baseHash is required unless force is set")
   const content = req.content
-  return withPathLock(resolve(target), async () => {
-    const current = await stat(target)
-    if (
-      !req.force &&
-      Math.abs(current.mtimeMs - req.baseMtimeMs!) > MTIME_TOLERANCE_MS
-    ) {
-      throw new HttpError(409, "conflict", "The file changed on disk", {
-        currentMtimeMs: current.mtimeMs,
-      })
+  const real = await canonicalPath(target)
+  return withPathLock(real, async () => {
+    const current = await stat(real)
+    if (!req.force) {
+      const currentHash = contentHash(await readFile(real))
+      if (currentHash !== req.baseHash) {
+        throw new HttpError(409, "conflict", "The file changed on disk", {
+          currentHash,
+          currentMtimeMs: current.mtimeMs,
+        })
+      }
     }
-    return atomicWrite(target, content, current.mode & 0o7777)
+    const mtimeMs = await atomicWrite(real, content, current.mode & 0o7777)
+    return { mtimeMs, hash: contentHash(content) }
   })
 }
 

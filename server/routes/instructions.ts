@@ -19,12 +19,11 @@ export function instructionRoutes(svc: Services): Hono {
   )
 
   app.put("/instructions/:id", async (c) => {
-    const mtimeMs = await svc.instructions.save(
+    const body: SaveResponse = await svc.instructions.save(
       c.req.param("id"),
       await readJson<SaveInstructionRequest>(c)
     )
     svc.skills.invalidate()
-    const body: SaveResponse = { mtimeMs }
     return c.json(body)
   })
 

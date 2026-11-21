@@ -15,7 +15,7 @@ function skill(scope: string, location: string): IndexedSkill {
     editable: true,
     cliName: "shared",
     folderName: "shared",
-    placements: [{ path: location, root: location, scope }],
+    placements: [{ path: location, root: location, scope, deletable: true }],
   }
 }
 

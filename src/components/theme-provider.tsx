@@ -111,6 +111,12 @@ export function ThemeProvider({
 
       root.classList.remove("light", "dark")
       root.classList.add(resolvedTheme)
+      // The theme is a class, not the OS setting, so the browser chrome / status
+      // bar color has to follow it by hand. Values match --background.
+      const chrome = resolvedTheme === "dark" ? "#0c090c" : "#ffffff"
+      document
+        .querySelectorAll('meta[name="theme-color"]')
+        .forEach((meta) => meta.setAttribute("content", chrome))
 
       if (restoreTransitions) {
         restoreTransitions()

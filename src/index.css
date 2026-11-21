@@ -126,6 +126,30 @@
     }
   html {
     @apply font-mono;
+    /* Mobile platform baseline: no tap flash, no font inflation, no page-level
+       pull-to-refresh (the app has its own scroll containers). */
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    overscroll-behavior: none;
+    }
+  body {
+    overscroll-behavior: none;
+    }
+  /* iOS zooms into inputs under 16px and never zooms back out. */
+  @media (pointer: coarse) {
+    input, textarea, select {
+      font-size: 16px;
+      }
+    }
+  /* Controls: fire click without the double-tap wait, and don't select labels on long-press. */
+  button, [role="button"], [role="tab"], [role="menuitem"], [role="option"], summary {
+    touch-action: manipulation;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    }
+  a {
+    touch-action: manipulation;
     }
 }
 /* ---------- Syntax colors (editor and preview) ---------- */

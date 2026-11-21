@@ -18,6 +18,14 @@ export interface SkillLocation {
   /** agent ids that see the skill through this location */
   agents: string[]
   kind: LocationKind
+  /**
+   * The manager may delete manual skills here: true for user-level agent
+   * skills dirs and for project skills dirs under a dot folder
+   * (.claude/skills, .agents/skills). False for generic project dirs
+   * (skills/, data/skills, agent/skills), which often hold a project's own
+   * source folders, and for plugin, synced and system dirs.
+   */
+  deletable: boolean
   pluginName?: string
 }
 
@@ -35,12 +43,18 @@ export class SkillLocator {
     const jobs: Promise<SkillLocation[]>[] = []
     const globalDirs = this.agents.globalDirs()
     for (const [dir, readers] of globalDirs)
-      jobs.push(this.collect(dir, "user", readers, "agent"))
+      jobs.push(this.collect(dir, "user", readers, "agent", true))
     const codexSkills = join(config.codexHome, "skills")
     if (!globalDirs.has(codexSkills))
-      jobs.push(this.collect(codexSkills, "user", ["codex"], "agent"))
+      jobs.push(this.collect(codexSkills, "user", ["codex"], "agent", true))
     jobs.push(
-      this.collect(join(codexSkills, ".system"), "user", ["codex"], "system")
+      this.collect(
+        join(codexSkills, ".system"),
+        "user",
+        ["codex"],
+        "system",
+        false
+      )
     )
     jobs.push(this.synced())
     jobs.push(this.plugins())
@@ -50,10 +64,11 @@ export class SkillLocator {
   async project(root: string): Promise<SkillLocation[]> {
     const jobs: Promise<SkillLocation[]>[] = []
     for (const [rel, readers] of this.agents.projectDirs()) {
-      // Generic dirs like "skills" are often source folders, not installs.
-      const generic = !rel.startsWith(".")
+      // Generic dirs like "skills" are often source folders, not installs:
+      // shown only for a detected agent, and never deleted from.
+      const generic = !isDotProjectDir(rel)
       if (generic && !readers.some((id) => this.agents.isDetected(id))) continue
-      jobs.push(this.collect(join(root, rel), root, readers, "agent"))
+      jobs.push(this.collect(join(root, rel), root, readers, "agent", !generic))
     }
     return (await Promise.all(jobs)).flat()
   }
@@ -64,7 +79,13 @@ export class SkillLocator {
     const jobs = groups
       .filter((g) => g.isDirectory())
       .map((g) =>
-        this.collect(join(root, g.name), "user", ["claude-code"], "synced")
+        this.collect(
+          join(root, g.name),
+          "user",
+          ["claude-code"],
+          "synced",
+          false
+        )
       )
     return (await Promise.all(jobs)).flat()
   }
@@ -93,7 +114,7 @@ export class SkillLocator {
             : "user"
         const dir = join(install.installPath, "skills")
         jobs.push(
-          this.collect(dir, scope, ["claude-code"], "plugin", pluginName)
+          this.collect(dir, scope, ["claude-code"], "plugin", false, pluginName)
         )
       }
     }
@@ -105,6 +126,7 @@ export class SkillLocator {
     scope: ScopeKey,
     readers: string[],
     kind: LocationKind,
+    deletable: boolean,
     pluginName?: string
   ): Promise<SkillLocation[]> {
     const agents = this.agents.pickVisible(readers)
@@ -115,9 +137,16 @@ export class SkillLocator {
       scope,
       agents,
       kind,
+      deletable,
       ...(pluginName ? { pluginName } : {}),
     }))
   }
+}
+
+/** A project skills dir whose first path segment is a dot folder. */
+export function isDotProjectDir(rel: string): boolean {
+  const first = rel.split("/").find((part) => part !== "")
+  return first !== undefined && first.startsWith(".") && first !== "." && first !== ".."
 }
 
 /**

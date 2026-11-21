@@ -56,7 +56,7 @@ export function SkillsView({ scope, skillId, file }: SkillsViewProps) {
     }
   }
 
-  const select = (id: string) => navigate({ skill: id })
+  const select = (id: string, options?: { replace?: boolean }) => navigate({ skill: id }, options)
   const count = visible?.length ?? 0
   const total = skills.data?.length ?? 0
 

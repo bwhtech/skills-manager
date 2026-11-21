@@ -6,7 +6,7 @@ import type {
   SkillDetail,
   SkillSummary,
 } from "../../shared/api.ts"
-import type { IndexedSkill } from "../discovery/skill-index.ts"
+import { isRemovable, type IndexedSkill } from "../discovery/skill-index.ts"
 import {
   containedSkillMd,
   listSkillFiles,
@@ -66,9 +66,11 @@ export function skillRoutes(svc: Services): Hono {
     const target = await containedSkillMd(skill.realPath)
     if (!target)
       throw forbidden("SKILL.md is missing or links outside the skill folder")
-    const mtimeMs = await saveTextFile(target, await readJson<SaveRequest>(c))
+    const body: SaveResponse = await saveTextFile(
+      target,
+      await readJson<SaveRequest>(c)
+    )
     svc.skills.invalidate()
-    const body: SaveResponse = { mtimeMs }
     return c.json(body)
   })
 
@@ -88,5 +90,5 @@ function toSummary(skill: IndexedSkill, svc: Services): SkillSummary {
   const updateAvailable =
     skill.origin === "npx" &&
     svc.updates.has(skill.scope, [cliName, folderName, skill.name])
-  return { ...rest, updateAvailable }
+  return { ...rest, removable: isRemovable(skill), updateAvailable }
 }

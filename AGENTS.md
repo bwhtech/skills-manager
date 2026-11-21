@@ -50,7 +50,10 @@ to install, update and remove skills.
   Per-skill Update and Update all. CLI output streams to a log drawer.
 - Install: search skills.sh, or paste `owner/repo` / URL and list its skills. Pick scope
   (user or one project) and agents (default: `lastSelectedAgents` from the lock file).
-- Remove, with confirmation.
+- Remove, with confirmation. The CLI removes npx skills. The server deletes a manual skill only
+  from a user-level agent skills dir or a project skills dir under a dot folder
+  (`.claude/skills`, `.agents/skills`). In other project dirs (`skills/`, `data/skills`), Remove
+  is disabled (`SkillSummary.removable`), because those folders are often the project's source.
 - Out of scope for v1: subagents, slash commands, rules, creating new skills, copy/move.
 
 ## Rules

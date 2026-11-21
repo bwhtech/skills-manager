@@ -18,6 +18,12 @@ export interface Place {
 const listeners = new Set<() => void>()
 /** The hash the app shows. It lags the URL while a leave prompt is open. */
 let committedHash = window.location.hash
+/**
+ * History index of the entry the app shows. Entries the app creates carry
+ * their index in history.state.smIdx, so a Back or Forward can be measured
+ * (delta = arrived index - shown index) and undone with history.go(-delta).
+ */
+let shownIdx = 0
 let cachedHash: string | null = null
 let cachedPlace: Place
 
@@ -72,29 +78,109 @@ function leavesEditor(current: Place, next: Place) {
   )
 }
 
-/** Show the place of this hash. replaceState does not fire hashchange. */
-function commit(hash: string) {
-  if (window.location.hash !== hash) history.replaceState(null, "", hash)
+function entryIdx(): number | null {
+  const idx = (history.state as { smIdx?: unknown } | null)?.smIdx
+  return typeof idx === "number" ? idx : null
+}
+
+function stampEntry(idx: number) {
+  history.replaceState({ ...(history.state as object | null), smIdx: idx }, "")
+}
+
+function show(hash: string) {
   committedHash = hash
   for (const listener of listeners) listener()
 }
 
-// Back/forward, hand-edited hashes and hash links change the URL first. Put
-// the shown hash back while the leave prompt is open; move on only if the
-// user agrees to discard the draft.
-window.addEventListener("hashchange", () => {
+/** An in-app move: a new history entry, or replace the shown one. No events fire. */
+function movePlace(hash: string, replace: boolean) {
+  if (replace) history.replaceState({ smIdx: shownIdx }, "", hash)
+  else history.pushState({ smIdx: ++shownIdx }, "", hash)
+  show(hash)
+}
+
+/**
+ * Accept the entry the browser is on now. An entry without an index is new
+ * (a typed hash or a hash link), so it comes right after the shown one.
+ */
+function adoptEntry() {
+  const idx = entryIdx() ?? shownIdx + 1
+  if (entryIdx() !== idx) stampEntry(idx)
+  shownIdx = idx
+  show(window.location.hash)
+}
+
+interface OwnMove {
+  /** where the move lands: the hash and the entry index (null = no index) */
+  hash: string
+  idx: number | null
+  done: () => void
+  timer: number
+}
+
+/** Set while the app itself moves through history; its events are not user moves. */
+let ownMove: OwnMove | null = null
+
+function moveBy(delta: number, to: { hash: string; idx: number | null }, done: () => void) {
+  // Give up waiting if the browser does not move (it should always move).
+  const timer = window.setTimeout(() => {
+    if (ownMove?.timer === timer) ownMove = null
+  }, 2000)
+  ownMove = { ...to, done, timer }
+  history.go(delta)
+}
+
+// Back/forward, typed hashes and hash links change the URL first. While the
+// editor is dirty, undo the move (history.go(-delta)) so the entries stay as
+// they were, then ask; on Discard, replay it (history.go(delta)).
+function onHistoryChange() {
   const hash = window.location.hash
-  if (hash === committedHash) return
-  if (!isDirty() || !leavesEditor(getPlace(), parse(hash))) return commit(hash)
-  history.replaceState(null, "", committedHash)
-  confirmLeave(() => commit(hash))
-})
+  const idx = entryIdx()
+  if (ownMove) {
+    // A late hashchange of the user's move can come before our move lands.
+    if (hash !== ownMove.hash || idx !== ownMove.idx) return
+    const { done, timer } = ownMove
+    ownMove = null
+    window.clearTimeout(timer)
+    return done()
+  }
+  if (hash === committedHash && (idx === null || idx === shownIdx)) {
+    if (idx === null) stampEntry(shownIdx)
+    return
+  }
+  if (!isDirty() || !leavesEditor(getPlace(), parse(hash))) return adoptEntry()
+
+  // An entry without an index is new (typed hash, hash link): one step ahead.
+  const delta = idx === null ? 1 : idx - shownIdx
+  if (delta === 0) {
+    // The shown entry itself was replaced: no move to undo. Put the hash back.
+    const state = history.state as unknown
+    history.replaceState(state, "", committedHash)
+    return confirmLeave(() => {
+      history.replaceState(state, "", hash)
+      adoptEntry()
+    })
+  }
+  const back = { hash: committedHash, idx: shownIdx }
+  moveBy(-delta, back, () => confirmLeave(() => moveBy(delta, { hash, idx }, adoptEntry)))
+}
+
+window.addEventListener("popstate", onHistoryChange)
+// Fires after popstate for the same move; by then there is nothing to do.
+window.addEventListener("hashchange", onHistoryChange)
+
+if (entryIdx() === null) stampEntry(0)
+else shownIdx = entryIdx()!
 
 /**
  * Move to another place. Asks first when the open editor has unsaved changes.
- * Uses replaceState, so moving around does not fill the history.
+ * Each move is a new history entry, so Back and Forward walk through places;
+ * `replace` changes the shown entry instead (keyboard steps through a list).
  */
-export function navigate(patch: Partial<Place>, options: { force?: boolean } = {}) {
+export function navigate(
+  patch: Partial<Place>,
+  options: { force?: boolean; replace?: boolean } = {}
+) {
   const current = getPlace()
   const next = { ...current, ...patch }
   // A new scope resets the selection inside it; a new skill resets the file.
@@ -108,7 +194,7 @@ export function navigate(patch: Partial<Place>, options: { force?: boolean } = {
   }
   const hash = serialize(next)
   if (hash === committedHash) return
-  const go = () => commit(hash)
+  const go = () => movePlace(hash, options.replace ?? false)
   if (options.force || !leavesEditor(current, next)) go()
   else confirmLeave(go)
 }

@@ -16,11 +16,36 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { api, errorMessage, useJobMutation, useScopes } from "@/lib/api"
 import { scopeLabel } from "@/lib/format"
 import { showJob } from "@/features/jobs/job-store"
 
+const NOT_REMOVABLE =
+  "This folder is in the project's own skills folder, not in an agent install folder " +
+  "such as .claude/skills or .agents/skills. It is likely part of the project's source, " +
+  "so Remove is off here. Delete it by hand if you mean to."
+
 export function RemoveSkillButton({ skill }: { skill: SkillSummary }) {
+  if (!skill.removable) return <DisabledRemoveButton />
+  return <RemovableSkillButton skill={skill} />
+}
+
+function DisabledRemoveButton() {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span tabIndex={0} aria-label={`Remove is off. ${NOT_REMOVABLE}`} />}>
+        <Button variant="destructive" size="sm" className="pointer-events-none h-7" disabled>
+          <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
+          Remove
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-sm">{NOT_REMOVABLE}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function RemovableSkillButton({ skill }: { skill: SkillSummary }) {
   const [open, setOpen] = useState(false)
   const projects = useScopes().data?.projects
   const remove = useJobMutation(api.removeSkill)

@@ -5,7 +5,6 @@ import {
   readFile,
   realpath,
   rm,
-  stat,
   symlink,
   writeFile,
 } from "node:fs/promises"
@@ -16,6 +15,7 @@ import { createApi } from "../app.ts"
 import { containedSkillMd } from "../discovery/skill-files.ts"
 import type { IndexedSkill } from "../discovery/skill-index.ts"
 import { listSkillFolders } from "../discovery/skill-locations.ts"
+import { readTextFile } from "../lib/files.ts"
 import type { Services } from "../services.ts"
 
 const base = await realpath(await mkdtemp(join(tmpdir(), "skills-md-")))
@@ -83,7 +83,7 @@ describe("SKILL.md containment", () => {
       },
       body: JSON.stringify({
         content: "pwned",
-        baseMtimeMs: (await stat(secret)).mtimeMs,
+        baseHash: (await readTextFile(secret)).hash,
       }),
     })
     expect(res.status).toBe(403)

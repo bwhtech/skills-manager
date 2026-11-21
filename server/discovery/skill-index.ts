@@ -31,10 +31,13 @@ export interface SkillPlacement {
   path: string
   root: string
   scope: ScopeKey
+  /** the manager may delete a manual skill here (see SkillLocation) */
+  deletable: boolean
 }
 
 /** A discovered skill. `cliName` is the name the skills CLI knows it by. */
-export interface IndexedSkill extends Omit<SkillSummary, "updateAvailable"> {
+export interface IndexedSkill
+  extends Omit<SkillSummary, "updateAvailable" | "removable"> {
   cliName: string
   folderName: string
   placements: SkillPlacement[]
@@ -165,7 +168,12 @@ export class SkillIndex {
       editable: origin === "npx" || origin === "manual",
       cliName: lockName ?? listed?.name ?? name,
       folderName,
-      placements: locs.map(({ path, root, scope }) => ({ path, root, scope })),
+      placements: locs.map(({ path, root, scope, deletable }) => ({
+        path,
+        root,
+        scope,
+        deletable,
+      })),
     }
     if (origin === "npx") {
       const source = lockName
@@ -177,6 +185,17 @@ export class SkillIndex {
     if (origin === "plugin" && pluginName) skill.pluginName = pluginName
     return skill
   }
+}
+
+/**
+ * DELETE can act: the CLI removes npx skills; a manual skill needs at least
+ * one placement in a dir the manager may delete from.
+ */
+export function isRemovable(
+  skill: Pick<IndexedSkill, "origin" | "placements">
+): boolean {
+  if (skill.origin === "npx") return true
+  return skill.origin === "manual" && skill.placements.some((p) => p.deletable)
 }
 
 function originOf(kind: LocationKind, tracked: boolean): SkillOrigin {

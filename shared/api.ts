@@ -101,6 +101,14 @@ export interface SkillSummary {
   scopes: ScopeKey[]
   origin: SkillOrigin
   editable: boolean // false for plugin, synced, system
+  /**
+   * DELETE /api/skills/:id may act: true for npx skills (the CLI removes them)
+   * and for manual skills in a user-level agent skills dir or a project skills
+   * dir under a dot folder (.claude/skills, .agents/skills). Manual skills in
+   * other project dirs (e.g. skills/, data/skills) are often the project's own
+   * source folders, so they stay browsable and editable but not removable.
+   */
+  removable: boolean
   source?: SkillSource // origin === "npx"
   pluginName?: string // origin === "plugin"
   updateAvailable: boolean // from the last update check
@@ -123,32 +131,40 @@ export interface SkillDetail extends SkillSummary {
 
 export interface FileContent {
   content: string
+  /** for display only; conflicts use hash */
   mtimeMs: number
+  /** sha256 hex of the file bytes: the version token for SaveRequest.baseHash */
+  hash: string
 }
 
 // GET /api/skills/:id                    -> SkillDetail
 // GET /api/skills/:id/file?path=<rel>    -> FileContent (text files only, max 1 MB, read-only)
 // PUT /api/skills/:id/skill-md  SaveRequest -> SaveResponse
-//   403 if the skill is not editable. 409 SaveConflict if the file changed on disk.
+//   403 if the skill is not editable. 409 SaveConflict if the file on disk no longer
+//   has baseHash (compared under a per-file lock keyed by the canonical path).
 // DELETE /api/skills/:id                 -> JobRef
 //   npx skills: runs `skills remove -s <name> -y` (+ -g for user scope, cwd = project).
 //   manual skills: the server deletes the folder itself (job logs what it did).
-//   403 for plugin, synced, system.
+//   403 for plugin, synced, system, and for skills with removable: false.
 
 export interface SaveRequest {
   content: string
-  /** mtimeMs the client loaded. Omit only together with force. */
-  baseMtimeMs?: number
+  /** FileContent.hash the client loaded. Omit only together with force. */
+  baseHash?: string
   /** overwrite even if the file changed on disk */
   force?: boolean
 }
 
 export interface SaveResponse {
   mtimeMs: number
+  /** sha256 hex of the saved content: the next baseHash */
+  hash: string
 }
 
 export interface SaveConflict extends ApiError {
   error: "conflict"
+  /** hash of the file on disk now */
+  currentHash: string
   currentMtimeMs: number
 }
 

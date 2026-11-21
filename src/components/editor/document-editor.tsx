@@ -14,7 +14,8 @@ import { MarkdownPreview } from "./markdown-preview"
 import { useViewMode } from "./view-mode"
 
 export interface SaveOptions {
-  baseMtimeMs: number
+  /** FileContent.hash of the version the draft started from */
+  baseHash: string
   force?: boolean
 }
 
@@ -56,7 +57,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   // A refetch brought a newer version: take it while there is nothing to lose.
   if (seen !== file) {
     setSeen(file)
-    if (!dirty && file.mtimeMs !== base.mtimeMs) {
+    if (!dirty && file.hash !== base.hash) {
       setBase(file)
       setDraft(file.content)
     }
@@ -84,8 +85,8 @@ export default function DocumentEditor(props: DocumentEditorProps) {
     const content = draft
     setSaving(true)
     try {
-      const result = await props.onSave(content, { baseMtimeMs: base.mtimeMs, force })
-      setBase({ content, mtimeMs: result.mtimeMs })
+      const result = await props.onSave(content, { baseHash: base.hash, force })
+      setBase({ content, mtimeMs: result.mtimeMs, hash: result.hash })
       toast.success(`Saved ${title}`)
     } catch (error) {
       if (isConflict(error)) setConflict(true)

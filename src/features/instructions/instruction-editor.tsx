@@ -23,8 +23,8 @@ export function InstructionEditor({ file }: { file: InstructionFile }) {
     )
   }
 
-  const save = async (text: string, { baseMtimeMs, force }: SaveOptions) => {
-    const result = await api.saveInstruction(file.id, { content: text, baseMtimeMs, force })
+  const save = async (text: string, { baseHash, force }: SaveOptions) => {
+    const result = await api.saveInstruction(file.id, { content: text, baseHash, force })
     void client.invalidateQueries({ queryKey: keys.instruction(file.id) })
     return result
   }

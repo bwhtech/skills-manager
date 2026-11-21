@@ -1,66 +1,122 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
 import {
+  lstat,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   stat,
   symlink,
-  utimes,
   writeFile,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { HttpError } from "../lib/errors.ts"
-import { resolveLink, saveTextFile } from "../lib/files.ts"
+import {
+  canonicalPath,
+  readTextFile,
+  resolveLink,
+  saveTextFile,
+} from "../lib/files.ts"
 
 const dir = await mkdtemp(join(tmpdir(), "skills-manager-test-"))
 afterAll(() => rm(dir, { recursive: true, force: true }))
 
+const sha = (text: string) => createHash("sha256").update(text).digest("hex")
+
 describe("saveTextFile", () => {
-  test("saves when baseMtimeMs matches, leaves no temp files", async () => {
+  test("saves when baseHash matches, leaves no temp files", async () => {
     const file = join(dir, "SKILL.md")
     await writeFile(file, "old")
-    const base = (await stat(file)).mtimeMs
-    const mtime = await saveTextFile(file, {
+    const loaded = await readTextFile(file)
+    expect(loaded.hash).toBe(sha("old"))
+    const saved = await saveTextFile(file, {
       content: "new",
-      baseMtimeMs: base,
+      baseHash: loaded.hash,
     })
     expect(await readFile(file, "utf8")).toBe("new")
-    expect(mtime).toBe((await stat(file)).mtimeMs)
+    expect(saved.hash).toBe(sha("new"))
+    expect(saved.mtimeMs).toBe((await stat(file)).mtimeMs)
     expect((await readdir(dir)).filter((n) => n.endsWith(".tmp"))).toEqual([])
   })
 
-  test("409 with currentMtimeMs when the file changed", async () => {
+  test("409 with currentHash when the content changed", async () => {
     const file = join(dir, "conflict.md")
     await writeFile(file, "a")
-    const base = (await stat(file)).mtimeMs - 5000
     const err = await saveTextFile(file, {
       content: "b",
-      baseMtimeMs: base,
+      baseHash: sha("something else"),
     }).catch((e) => e)
     expect(err).toBeInstanceOf(HttpError)
     expect(err.status).toBe(409)
+    expect(err.extra.currentHash).toBe(sha("a"))
     expect(err.extra.currentMtimeMs).toBe((await stat(file)).mtimeMs)
     expect(await readFile(file, "utf8")).toBe("a")
   })
 
-  test("concurrent saves with the same base: one wins, one conflicts", async () => {
-    const file = join(dir, "race.md")
+  test("a save without baseHash or force is rejected", async () => {
+    const file = join(dir, "nobase.md")
     await writeFile(file, "a")
-    // An old mtime, so the first write surely moves it past the tolerance.
-    await utimes(file, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000))
-    const base = (await stat(file)).mtimeMs
-    const results = await Promise.allSettled([
-      saveTextFile(file, { content: "one", baseMtimeMs: base }),
-      saveTextFile(file, { content: "two", baseMtimeMs: base }),
-    ])
-    const ok = results.filter((r) => r.status === "fulfilled")
-    const failed = results.filter((r) => r.status === "rejected")
-    expect(ok).toHaveLength(1)
-    expect(failed).toHaveLength(1)
-    expect((failed[0] as PromiseRejectedResult).reason.status).toBe(409)
-    expect(await readFile(file, "utf8")).toBe("one")
+    const err = await saveTextFile(file, { content: "b" }).catch((e) => e)
+    expect(err.status).toBe(400)
+    expect(await readFile(file, "utf8")).toBe("a")
+  })
+
+  test("concurrent saves with the same base: exactly one 409, 100 times", async () => {
+    const file = join(dir, "race.md")
+    for (let i = 0; i < 100; i++) {
+      await writeFile(file, `base ${i}`)
+      const baseHash = (await readTextFile(file)).hash
+      const results = await Promise.allSettled([
+        saveTextFile(file, { content: `one ${i}`, baseHash }),
+        saveTextFile(file, { content: `two ${i}`, baseHash }),
+      ])
+      const failed = results.filter((r) => r.status === "rejected")
+      expect(failed).toHaveLength(1)
+      expect((failed[0] as PromiseRejectedResult).reason.status).toBe(409)
+      // Either may win; the file holds the winner's content.
+      const winner = results[0].status === "fulfilled" ? "one" : "two"
+      expect(await readFile(file, "utf8")).toBe(`${winner} ${i}`)
+    }
+  })
+
+  test("aliases of one file share a lock: exactly one 409", async () => {
+    const realDir = join(dir, "real-dir")
+    await mkdir(realDir)
+    const file = join(realDir, "AGENTS.md")
+    const viaParent = join(dir, "dir-alias", "AGENTS.md")
+    const viaLink = join(dir, "file-alias.md")
+    await writeFile(file, "start")
+    await symlink(realDir, join(dir, "dir-alias"))
+    await symlink(file, viaLink)
+    expect(await canonicalPath(viaParent)).toBe(await realpath(file))
+    expect(await canonicalPath(viaLink)).toBe(await realpath(file))
+    for (let i = 0; i < 100; i++) {
+      await writeFile(file, `base ${i}`)
+      const baseHash = sha(`base ${i}`)
+      const contents = [`real ${i}`, `parent ${i}`, `link ${i}`]
+      const results = await Promise.allSettled(
+        [file, viaParent, viaLink].map((path, n) =>
+          saveTextFile(path, { content: contents[n], baseHash })
+        )
+      )
+      const won = results.findIndex((r) => r.status === "fulfilled")
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1)
+      for (const r of results)
+        if (r.status === "rejected") expect(r.reason.status).toBe(409)
+      expect(await readFile(file, "utf8")).toBe(contents[won])
+    }
+    // The link stays a link: writes go to the real file.
+    expect((await lstat(viaLink)).isSymbolicLink()).toBe(true)
+  })
+
+  test("canonicalPath of a missing file resolves its parent dir", async () => {
+    expect(await canonicalPath(join(dir, "dir-alias", "new.md"))).toBe(
+      join(await realpath(join(dir, "real-dir")), "new.md")
+    )
   })
 
   test("force overwrites without a base", async () => {

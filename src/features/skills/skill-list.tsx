@@ -10,7 +10,8 @@ interface SkillListProps {
   error: string | null
   totalCount: number
   selectedId: string | null
-  onSelect: (skillId: string) => void
+  /** replace: a keyboard step through the list, which should not add a history entry */
+  onSelect: (skillId: string, options?: { replace?: boolean }) => void
   /** lets the search box move the selection too */
   keyHandlerRef: React.RefObject<((event: KeyboardEvent) => boolean) | null>
 }
@@ -35,7 +36,7 @@ export function SkillList(props: SkillListProps) {
               : null
     if (next === null) return false
     event.preventDefault()
-    if (skills[next].id !== selectedId) onSelect(skills[next].id)
+    if (skills[next].id !== selectedId) onSelect(skills[next].id, { replace: true })
     return true
   }
 
