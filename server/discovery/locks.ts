@@ -8,6 +8,15 @@ export interface LockEntry {
   sourceUrl?: string
   sourceType?: string
   skillPath?: string
+  /** branch, tag or commit the skill was installed from */
+  ref?: string
+  /** the skill's name in its source, when installed under another name */
+  skillName?: string
+  /** global lock: version token; `skills update` skips git entries without it */
+  skillFolderHash?: string
+  /** global lock, well-known sources */
+  sourceBaseUrl?: string
+  wellKnownDigest?: string
 }
 
 export interface SkillLock {
@@ -51,6 +60,11 @@ async function readLock(path: string): Promise<SkillLock> {
       sourceUrl: str(entry.sourceUrl),
       sourceType: str(entry.sourceType),
       skillPath: str(entry.skillPath),
+      ref: str(entry.ref),
+      skillName: str(entry.skillName),
+      skillFolderHash: str(entry.skillFolderHash),
+      sourceBaseUrl: str(entry.sourceBaseUrl),
+      wellKnownDigest: str(entry.wellKnownDigest),
     })
   }
   if (Array.isArray(raw.lastSelectedAgents)) {

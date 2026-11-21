@@ -5,6 +5,7 @@ import type {
   SaveResponse,
   SkillDetail,
   SkillSummary,
+  UpdatePreview,
 } from "../../shared/api.ts"
 import { isRemovable, type IndexedSkill } from "../discovery/skill-index.ts"
 import {
@@ -57,6 +58,12 @@ export function skillRoutes(svc: Services): Hono {
   app.get("/skills/:id/file", async (c) => {
     const skill = await lookup(c.req.param("id"))
     return c.json(await readSkillFile(skill.realPath, c.req.query("path")))
+  })
+
+  app.get("/skills/:id/update-preview", async (c) => {
+    const skill = await lookup(c.req.param("id"))
+    const body: UpdatePreview = await svc.previews.preview(skill)
+    return c.json(body)
   })
 
   app.put("/skills/:id/skill-md", async (c) => {

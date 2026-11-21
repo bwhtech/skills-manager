@@ -13,11 +13,17 @@ import { forbidden } from "./lib/errors.ts"
 import { isInside, realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
 
+export interface ActionHooks {
+  /** after an update job; names empty = every skill in the scope */
+  afterUpdate?: (scope: string, names: string[]) => void
+}
+
 /** Builds and queues the jobs that change installed skills. */
 export class SkillActions {
   constructor(
     private readonly cli: SkillsCli,
-    private readonly jobs: JobManager
+    private readonly jobs: JobManager,
+    private readonly hooks: ActionHooks = {}
   ) {}
 
   install(req: InstallRequest): Job {
@@ -54,7 +60,8 @@ export class SkillActions {
       "update",
       `Update ${what} (${scopeLabel(req.scope)})`,
       args,
-      req.scope
+      req.scope,
+      () => this.hooks.afterUpdate?.(req.scope, req.names)
     )
   }
 
@@ -88,7 +95,8 @@ export class SkillActions {
     kind: Job["kind"],
     title: string,
     args: string[],
-    scope: string
+    scope: string,
+    onDone?: () => void
   ): Job {
     const cwd = scope === "user" ? config.home : scope
     return this.jobs.enqueue({
@@ -96,6 +104,7 @@ export class SkillActions {
       title,
       command: this.cli.display(args),
       cwd,
+      onDone,
       run: async (log) => {
         const { exitCode, timedOut } = await this.cli.stream(
           args,

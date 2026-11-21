@@ -7,6 +7,7 @@ import { InstructionService } from "./discovery/instructions.ts"
 import { ProjectService } from "./discovery/projects.ts"
 import { SkillIndex } from "./discovery/skill-index.ts"
 import { JobManager } from "./jobs.ts"
+import { UpdatePreviewService } from "./preview/service.ts"
 import { StateStore } from "./state.ts"
 import { UpdateChecker } from "./updates.ts"
 
@@ -20,13 +21,29 @@ export interface Services {
   jobs: JobManager
   actions: SkillActions
   catalog: Catalog
+  previews: UpdatePreviewService
 }
 
 export async function createServices(): Promise<Services> {
   const cli = new SkillsCli()
-  cli.setGithubToken(readGithubToken())
+  const token = readGithubToken()
+  cli.setGithubToken(token)
+  const previews = new UpdatePreviewService(
+    {
+      root: config.previewCacheDir,
+      ttlMs: config.previewTtlMs,
+      maxConcurrent: config.previewMaxFetches,
+      timeoutMs: config.previewFetchTimeoutMs,
+    },
+    undefined,
+    token
+  )
   const projects = new ProjectService(new StateStore(config.stateFile))
-  const [agents] = await Promise.all([AgentRegistry.load(), projects.init()])
+  const [agents] = await Promise.all([
+    AgentRegistry.load(),
+    projects.init(),
+    previews.init(),
+  ])
   const skills = new SkillIndex(agents, projects, cli)
   const updates = new UpdateChecker(cli, projects)
   const jobs = new JobManager(() => {
@@ -40,7 +57,10 @@ export async function createServices(): Promise<Services> {
     instructions: new InstructionService(projects),
     updates,
     jobs,
-    actions: new SkillActions(cli, jobs),
+    actions: new SkillActions(cli, jobs, {
+      afterUpdate: (scope, names) => previews.invalidate(scope, names),
+    }),
     catalog: new Catalog(cli),
+    previews,
   }
 }

@@ -1,4 +1,4 @@
-import { homedir } from "node:os"
+import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 const home = homedir()
@@ -23,6 +23,13 @@ export const config = {
   scanSkipPaths: [join(home, "pilot"), "/mnt/data/cache"],
   skillCacheTtlMs: 10_000,
   cliTimeoutMs: 120_000,
+  /** Upstream checkouts for update previews. Wiped at startup. */
+  previewCacheDir:
+    process.env.SKILLS_MANAGER_PREVIEW_DIR?.trim() ||
+    join(tmpdir(), "skills-manager-preview"),
+  previewTtlMs: 10 * 60_000,
+  previewFetchTimeoutMs: 60_000,
+  previewMaxFetches: 3,
 }
 
 export const projectLockName = "skills-lock.json"

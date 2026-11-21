@@ -9,6 +9,8 @@ export interface JobSpec {
   cwd: string
   /** does the work and returns an exit code */
   run: (log: JobLog) => Promise<number>
+  /** called once the job has finished, whatever the outcome */
+  onDone?: (job: Job) => void
 }
 
 export type JobEvent =
@@ -83,10 +85,12 @@ export class JobManager {
     this.active--
     this.emit(job.id, { type: "done", job })
     this.listeners.delete(job.id)
-    try {
-      this.onFinished(job)
-    } catch (err) {
-      console.error(err)
+    for (const done of [spec.onDone, this.onFinished]) {
+      try {
+        done?.(job)
+      } catch (err) {
+        console.error(err)
+      }
     }
   }
 

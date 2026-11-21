@@ -224,6 +224,44 @@ export interface UpdateRunRequest {
   names?: string[] // omitted = all in that scope
 }
 
+// GET /api/skills/:id/update-preview -> UpdatePreview
+//   Only for origin "npx" skills (400 otherwise). Compares the local skill folder (what is on
+//   disk now, including any local edits) with the version `skills update` would install.
+//   400 when `skills update` cannot update the skill (e.g. local or legacy lock entries),
+//   409 when the update would fail (skill deleted, moved ambiguously or renamed upstream),
+//   502 when the source could not be fetched, 504 when the fetch timed out.
+//   The upstream fetch is cached per (source, ref) for about 10 minutes.
+export interface UpdatePreview {
+  skillId: string
+  name: string
+  scope: ScopeKey
+  source: string // owner/repo
+  remoteRef: string | null // commit sha or tree hash fetched, if known
+  upToDate: boolean // no file differences
+  files: UpdateFileChange[] // sorted by path; SKILL.md first
+  summary: {
+    added: number
+    removed: number
+    modified: number
+    linesAdded: number
+    linesRemoved: number
+  }
+  fetchedAt: string
+}
+
+export interface UpdateFileChange {
+  path: string // relative to the skill folder, posix
+  status: "added" | "removed" | "modified"
+  binary: boolean
+  /** omitted for added files, binary files, and files over the size cap */
+  oldContent?: string
+  /** omitted for removed files, binary files, and files over the size cap */
+  newContent?: string
+  tooLarge?: boolean // over 256 KB; contents omitted
+  linesAdded: number
+  linesRemoved: number
+}
+
 // ---------- Install ----------
 
 export interface SearchResult {
