@@ -23,7 +23,7 @@ export function SearchSource({ pick, onPick }: SearchSourceProps) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      <InputGroup className="h-9 shrink-0">
+      <InputGroup className="h-9 shrink-0 pointer-coarse:h-11">
         <InputGroupAddon>
           <HugeiconsIcon icon={Search01Icon} strokeWidth={2} />
         </InputGroupAddon>
@@ -33,6 +33,12 @@ export function SearchSource({ pick, onPick }: SearchSourceProps) {
           onChange={(event) => setText(event.target.value)}
           placeholder="Search skills.sh, e.g. react, pdf, testing"
           aria-label="Search skills.sh"
+          type="search"
+          enterKeyHint="search"
+          autoCapitalize="none"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
         />
         {results.isFetching && (
           <InputGroupAddon align="inline-end">
@@ -40,7 +46,10 @@ export function SearchSource({ pick, onPick }: SearchSourceProps) {
           </InputGroupAddon>
         )}
       </InputGroup>
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border" aria-label="Search results">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-2xl border max-md:flex-none max-md:overflow-visible"
+        aria-label="Search results"
+      >
         {query.length < 2 ? (
           <p className="p-4 text-xs text-muted-foreground">Type at least two characters.</p>
         ) : results.isPending ? (
@@ -64,7 +73,7 @@ export function SearchSource({ pick, onPick }: SearchSourceProps) {
                     aria-pressed={selected}
                     onClick={() => onPick(selected ? null : { source: result.source, skills: [result.skill] })}
                     className={cn(
-                      "flex h-11 min-w-0 flex-1 flex-col justify-center rounded-xl px-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50",
+                      "pressable flex h-11 min-w-0 flex-1 flex-col justify-center rounded-xl px-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50",
                       selected && "bg-primary/15 hover:bg-primary/20 dark:bg-primary/15"
                     )}
                   >
@@ -81,7 +90,7 @@ export function SearchSource({ pick, onPick }: SearchSourceProps) {
                     target="_blank"
                     rel="noreferrer noopener"
                     aria-label={`Open ${result.skill} on skills.sh`}
-                    className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className="pressable flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground pointer-coarse:size-11"
                   >
                     <HugeiconsIcon icon={LinkSquare02Icon} strokeWidth={2} className="size-3.5" />
                   </a>

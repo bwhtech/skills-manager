@@ -35,7 +35,7 @@ function DisabledRemoveButton() {
   return (
     <Tooltip>
       <TooltipTrigger render={<span tabIndex={0} aria-label={`Remove is off. ${NOT_REMOVABLE}`} />}>
-        <Button variant="destructive" size="sm" className="pointer-events-none h-7" disabled>
+        <Button variant="destructive" size="sm" className="pointer-events-none h-7 pointer-coarse:h-10" disabled>
           <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
           Remove
         </Button>
@@ -63,7 +63,7 @@ function RemovableSkillButton({ skill }: { skill: SkillSummary }) {
 
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogTrigger render={<Button variant="destructive" size="sm" className="h-7" />}>
+      <AlertDialogTrigger render={<Button variant="destructive" size="sm" className="h-7 pointer-coarse:h-10" />}>
         <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
         Remove
       </AlertDialogTrigger>

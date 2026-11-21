@@ -21,7 +21,7 @@ export function JobLog({ lines }: { lines: string[] }) {
         const el = event.currentTarget
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
       }}
-      className="min-h-0 flex-1 overflow-auto rounded-2xl bg-muted/60 p-3 font-mono text-xs leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      className="min-h-0 flex-1 overflow-auto overscroll-contain rounded-2xl bg-muted/60 p-3 font-mono text-xs leading-5 outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
     >
       {lines.length === 0 ? (
         <span className="text-muted-foreground">No output yet.</span>

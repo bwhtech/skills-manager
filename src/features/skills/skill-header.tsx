@@ -21,8 +21,9 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
 
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-b px-4 py-3">
-      <div className="flex min-h-7 items-center gap-2">
-        <h2 className="min-w-0 truncate text-base font-semibold">{skill.name}</h2>
+      {/* Phones: the screen bar already shows the name, and the row wraps. */}
+      <div className="flex min-h-7 items-center gap-2 max-md:flex-wrap max-md:gap-y-1.5">
+        <h2 className="min-w-0 truncate text-base font-semibold max-md:hidden">{skill.name}</h2>
         <OriginBadge origin={skill.origin} />
         {skill.updateAvailable && <UpdateBadge />}
         {readOnly && (
@@ -44,9 +45,11 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
           {showRemove && <RemoveSkillButton skill={skill} />}
         </div>
       </div>
-      <p className="line-clamp-2 text-xs text-muted-foreground" title={skill.description}>
+      <p className="line-clamp-2 text-xs text-muted-foreground max-md:line-clamp-none" title={skill.description}>
         {skill.description || "No description in the frontmatter."}
       </p>
+      {/* No hover on phones to read the badge's title: say it. */}
+      {readOnly && <p className="text-xs text-muted-foreground md:hidden">{readOnly}</p>}
     </div>
   )
 }

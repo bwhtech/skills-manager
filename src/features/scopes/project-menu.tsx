@@ -16,7 +16,13 @@ export function ProjectMenu({ project }: { project: ProjectInfo }) {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
-        render={<SidebarMenuAction showOnHover aria-label={`Actions for ${project.name}`} />}
+        render={
+          <SidebarMenuAction
+            showOnHover
+            aria-label={`Actions for ${project.name}`}
+            className="pointer-coarse:top-3! pointer-coarse:after:-inset-3"
+          />
+        }
       >
         <HugeiconsIcon icon={MoreHorizontalIcon} strokeWidth={2} />
       </DropdownMenuTrigger>

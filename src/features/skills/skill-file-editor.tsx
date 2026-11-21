@@ -54,6 +54,7 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
   return (
     <DocumentEditor
       key={skill.id}
+      draftKey={`skill:${skill.id}:${SKILL_MD}`}
       path={SKILL_MD}
       title={SKILL_MD}
       file={skill.skillMd}
@@ -83,6 +84,7 @@ function OtherFileViewer({ skill, path }: { skill: SkillDetail; path: string }) 
   return (
     <DocumentEditor
       key={`${skill.id}:${path}`}
+      draftKey={`skill:${skill.id}:${path}`}
       path={path}
       title={path}
       file={file.data}

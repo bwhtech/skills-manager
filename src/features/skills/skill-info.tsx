@@ -25,7 +25,7 @@ export function SkillInfo({ skill }: { skill: SkillDetail }) {
   return (
     <dl className="flex flex-col gap-3 p-3 text-xs">
       <Field label="Path">
-        <div className="flex items-start gap-1">
+        <div className="flex items-start gap-1 pointer-coarse:items-center">
           <span className="min-w-0 flex-1 font-mono break-all" title={skill.realPath}>
             {tildify(skill.realPath, home)}
           </span>

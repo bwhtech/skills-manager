@@ -78,7 +78,7 @@ function TreeItem({ node, depth, selectedPath, dirtyPath, onSelect }: TreeItemPr
   const [open, setOpen] = useState(depth < 1 || selectedPath.startsWith(node.path + "/"))
   const indent = { paddingLeft: `${8 + depth * 14}px` }
   const rowClass =
-    "flex h-7 w-full items-center gap-1.5 rounded-lg pr-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+    "pressable flex h-7 w-full items-center gap-1.5 rounded-lg pr-2 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50 pointer-coarse:h-11 pointer-coarse:gap-2 pointer-coarse:text-sm"
 
   if (!node.entry) {
     return (

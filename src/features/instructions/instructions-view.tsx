@@ -1,9 +1,13 @@
-import type { ScopeKey } from "@shared/api"
+import { useState } from "react"
+import type { InstructionFile, ScopeKey } from "@shared/api"
+import { ScreenBar, StackScreen } from "@/components/layout/stack-screen"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { Skeleton } from "@/components/ui/skeleton"
 import { errorMessage, useInstructions } from "@/lib/api"
-import { navigate } from "@/lib/hash-state"
+import { useIsDesktop } from "@/hooks/use-media-query"
+import { goUp, navigate } from "@/lib/hash-state"
+import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { CreateInstruction } from "./create-instruction"
 import { InstructionEditor } from "./instruction-editor"
 import { InstructionList } from "./instruction-list"
@@ -14,55 +18,47 @@ interface InstructionsViewProps {
 }
 
 export function InstructionsView({ scope, docId }: InstructionsViewProps) {
+  const isDesktop = useIsDesktop()
   const files = useInstructions(scope)
   const list = files.data ?? []
+
+  const listPane = (
+    <InstructionListPane
+      files={files}
+      list={list}
+      selectedId={isDesktop ? (pickDefault(list, docId)?.id ?? null) : docId}
+    />
+  )
+
+  if (!isDesktop) {
+    // Phones: the list, and the file on top of it once one is picked.
+    const open = docId ? list.find((file) => file.id === docId) : undefined
+    return (
+      <div className="relative min-h-0 flex-1">
+        <StackScreen root covered={!!docId}>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)]">
+            {listPane}
+          </div>
+        </StackScreen>
+        {docId && (
+          <InstructionScreen key={docId} file={open} loading={files.isPending} />
+        )}
+      </div>
+    )
+  }
+
   // Default to the first file that exists, so the tab opens on something useful.
-  const selected =
-    list.find((file) => file.id === docId) ?? list.find((file) => file.exists) ?? list[0] ?? null
+  const selected = pickDefault(list, docId)
 
   return (
     <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
       <ResizablePanel defaultSize={320} minSize={240} maxSize="50">
-        <div className="h-full overflow-y-auto">
-          {files.isPending ? (
-            <div className="flex flex-col gap-1 p-2" aria-busy="true">
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="flex h-15 flex-col justify-center gap-2 px-3">
-                  <Skeleton className="h-3.5 w-1/3" />
-                  <Skeleton className="h-3 w-3/4" />
-                </div>
-              ))}
-            </div>
-          ) : files.isError ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle className="text-base">Could not load instruction files</EmptyTitle>
-                <EmptyDescription>{errorMessage(files.error)}</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : list.length === 0 ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle className="text-base">No instruction files</EmptyTitle>
-              </EmptyHeader>
-            </Empty>
-          ) : (
-            <InstructionList
-              files={list}
-              selectedId={selected?.id ?? null}
-              onSelect={(id) => navigate({ doc: id })}
-            />
-          )}
-        </div>
+        <div className="h-full overflow-y-auto">{listPane}</div>
       </ResizablePanel>
       <ResizableHandle />
       <ResizablePanel minSize={480}>
         {selected ? (
-          selected.exists ? (
-            <InstructionEditor key={selected.id} file={selected} />
-          ) : (
-            <CreateInstruction key={selected.id} file={selected} />
-          )
+          <InstructionBody key={selected.id} file={selected} />
         ) : (
           !files.isPending && (
             <Empty className="h-full">
@@ -74,5 +70,88 @@ export function InstructionsView({ scope, docId }: InstructionsViewProps) {
         )}
       </ResizablePanel>
     </ResizablePanelGroup>
+  )
+}
+
+function pickDefault(list: InstructionFile[], docId: string | null) {
+  return list.find((file) => file.id === docId) ?? list.find((file) => file.exists) ?? list[0] ?? null
+}
+
+function InstructionBody({ file, onDirtyChange }: { file: InstructionFile; onDirtyChange?: (dirty: boolean) => void }) {
+  return file.exists ? (
+    <InstructionEditor file={file} onDirtyChange={onDirtyChange} />
+  ) : (
+    <CreateInstruction file={file} />
+  )
+}
+
+interface InstructionListPaneProps {
+  files: ReturnType<typeof useInstructions>
+  list: InstructionFile[]
+  selectedId: string | null
+}
+
+function InstructionListPane({ files, list, selectedId }: InstructionListPaneProps) {
+  if (files.isPending) {
+    return (
+      <div className="flex flex-col gap-1 p-2" aria-busy="true">
+        {[0, 1, 2].map((i) => (
+          <div key={i} className="flex h-15 flex-col justify-center gap-2 px-3">
+            <Skeleton className="h-3.5 w-1/3" />
+            <Skeleton className="h-3 w-3/4" />
+          </div>
+        ))}
+      </div>
+    )
+  }
+  if (files.isError) {
+    return (
+      <Empty>
+        <EmptyHeader>
+          <EmptyTitle className="text-base">Could not load instruction files</EmptyTitle>
+          <EmptyDescription>{errorMessage(files.error)}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+  if (list.length === 0) {
+    return (
+      <Empty>
+        <EmptyHeader>
+          <EmptyTitle className="text-base">No instruction files</EmptyTitle>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+  return <InstructionList files={list} selectedId={selectedId} onSelect={(id) => navigate({ doc: id })} />
+}
+
+/** Phone screen for one instruction file. */
+function InstructionScreen({ file, loading }: { file: InstructionFile | undefined; loading: boolean }) {
+  const [dirty, setDirty] = useState(false)
+  return (
+    <StackScreen>
+      <ScreenBar
+        title={file?.fileName ?? "Instruction file"}
+        subtitle={file?.agentLabel}
+        backLabel="instruction files"
+        dirty={file?.exists ? dirty : undefined}
+        onBack={() => goUp({ doc: null })}
+      />
+      <div className="min-h-0 flex-1">
+        {file ? (
+          <InstructionBody file={file} onDirtyChange={setDirty} />
+        ) : loading ? (
+          <EditorSkeleton />
+        ) : (
+          <Empty className="h-full">
+            <EmptyHeader>
+              <EmptyTitle className="text-base">File not found</EmptyTitle>
+              <EmptyDescription>Go back and pick another instruction file.</EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
+      </div>
+    </StackScreen>
   )
 }

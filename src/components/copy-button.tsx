@@ -20,7 +20,9 @@ export function CopyButton({ value, label = "Copy" }: { value: string; label?: s
   return (
     <Tooltip>
       <TooltipTrigger
-        render={<Button variant="ghost" size="icon-xs" aria-label={label} onClick={copy} />}
+        render={
+          <Button variant="ghost" size="icon-xs" className="pointer-coarse:size-10" aria-label={label} onClick={copy} />
+        }
       >
         <HugeiconsIcon icon={copied ? Tick02Icon : Copy01Icon} strokeWidth={2} />
       </TooltipTrigger>

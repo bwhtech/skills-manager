@@ -20,6 +20,7 @@ import {
   SidebarMenuItem,
   SidebarMenuSkeleton,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -35,8 +36,22 @@ function sortProjects(projects: ProjectInfo[]) {
   )
 }
 
+// Touch: rows 44px tall, with their count and menu re-centered.
+const COARSE_ROW = "pointer-coarse:h-11"
+const COARSE_SIDE = "pointer-coarse:top-3!"
+
+/** Open a scope; on phones also close the sidebar sheet, so the pick shows. */
+function useOpenScope() {
+  const { isMobile, setOpenMobile } = useSidebar()
+  return (scope: string) => {
+    if (isMobile) setOpenMobile(false)
+    navigate({ scope })
+  }
+}
+
 export function AppSidebar() {
   const { scope } = usePlace()
+  const openScope = useOpenScope()
   const scopes = useScopes()
   const userSkills = useSkills("user")
   const [pinOpen, setPinOpen] = useState(false)
@@ -52,19 +67,19 @@ export function AppSidebar() {
     : projects
 
   return (
-    <Sidebar>
-      <SidebarHeader className="h-12 flex-row items-center px-4">
+    <Sidebar className="pl-[env(safe-area-inset-left)]">
+      <SidebarHeader className="h-[calc(3rem+env(safe-area-inset-top))] flex-row items-center px-4 pt-[calc(--spacing(2)+env(safe-area-inset-top))]">
         <span className="font-heading text-sm font-semibold tracking-tight">Skills Manager</span>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton isActive={scope === "user"} onClick={() => navigate({ scope: "user" })}>
+              <SidebarMenuButton isActive={scope === "user"} onClick={() => openScope("user")} className={COARSE_ROW}>
                 <HugeiconsIcon icon={UserIcon} strokeWidth={2} />
                 <span>User</span>
               </SidebarMenuButton>
-              {userSkills.data && <SidebarMenuBadge>{userSkills.data.length}</SidebarMenuBadge>}
+              {userSkills.data && <SidebarMenuBadge className={COARSE_SIDE}>{userSkills.data.length}</SidebarMenuBadge>}
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>
@@ -80,6 +95,11 @@ export function AppSidebar() {
                 onChange={(event) => setFilter(event.target.value)}
                 placeholder="Filter projects"
                 aria-label="Filter projects"
+                type="search"
+                enterKeyHint="search"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 className="mb-1.5"
               />
             )}
@@ -105,13 +125,14 @@ export function AppSidebar() {
                   active={scope === project.path}
                   home={scopes.data?.home}
                   duplicate={(nameCounts.get(project.name) ?? 0) > 1}
+                  onOpen={openScope}
                 />
               ))}
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="border-t">
+      <SidebarFooter className="border-t pb-[calc(--spacing(2)+env(safe-area-inset-bottom))]">
         <div className="flex items-center gap-2 px-1">
           <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
             {scopes.data ? `Scanned ${timeAgo(scopes.data.lastScanAt)}` : " "}
@@ -119,6 +140,7 @@ export function AppSidebar() {
           <Button
             variant="ghost"
             size="xs"
+            className="pointer-coarse:h-10 pointer-coarse:px-3"
             disabled={rescan.isPending}
             onClick={() =>
               rescan.mutate(undefined, {
@@ -144,9 +166,10 @@ interface ProjectItemProps {
   home?: string
   /** another project has the same name: show the parent folder too */
   duplicate: boolean
+  onOpen: (scope: string) => void
 }
 
-function ProjectItem({ project, active, home, duplicate }: ProjectItemProps) {
+function ProjectItem({ project, active, home, duplicate, onOpen }: ProjectItemProps) {
   const parent = basename(project.path.slice(0, project.path.length - project.name.length - 1))
   return (
     <SidebarMenuItem>
@@ -155,8 +178,8 @@ function ProjectItem({ project, active, home, duplicate }: ProjectItemProps) {
           render={
             <SidebarMenuButton
               isActive={active}
-              onClick={() => navigate({ scope: project.path })}
-              className="pr-14!"
+              onClick={() => onOpen(project.path)}
+              className={`pr-14! ${COARSE_ROW}`}
             />
           }
         >
@@ -172,7 +195,7 @@ function ProjectItem({ project, active, home, duplicate }: ProjectItemProps) {
           {tildify(project.path, home)}
         </TooltipContent>
       </Tooltip>
-      <SidebarMenuBadge className="right-7">{project.skillCount}</SidebarMenuBadge>
+      <SidebarMenuBadge className={`right-7 ${COARSE_SIDE}`}>{project.skillCount}</SidebarMenuBadge>
       <ProjectMenu project={project} />
     </SidebarMenuItem>
   )

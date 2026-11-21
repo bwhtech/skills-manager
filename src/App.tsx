@@ -10,6 +10,8 @@ import { InstructionsView } from "@/features/instructions/instructions-view"
 import { JobsSheet } from "@/features/jobs/jobs-sheet"
 import { AppSidebar } from "@/features/scopes/app-sidebar"
 import { SkillsView } from "@/features/skills/skills-view"
+import { useIsDesktop } from "@/hooks/use-media-query"
+import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { usePlace } from "@/lib/hash-state"
 import { isMod, useWindowKeydown } from "@/lib/hotkeys"
 import { queryClient } from "@/lib/query-client"
@@ -42,8 +44,34 @@ function Main() {
   )
 }
 
+/**
+ * On phones a stacked screen (a skill, a file) brings its own top bar with a
+ * back button, so the app header steps aside, like a pushed native screen.
+ */
+function Header() {
+  const place = usePlace()
+  const isDesktop = useIsDesktop()
+  const pushed = place.tab === "skills" ? !!place.skill : !!place.doc
+  return isDesktop || !pushed ? <AppHeader /> : null
+}
+
+/** Phones: toasts at the top, under the notch, clear of the editor toolbar and the jobs log. */
+function AppToaster() {
+  const isDesktop = useIsDesktop()
+  return isDesktop ? (
+    <Toaster position="bottom-right" />
+  ) : (
+    <Toaster
+      position="top-center"
+      offset={{ top: "calc(env(safe-area-inset-top, 0px) + 12px)" }}
+      mobileOffset={{ top: "calc(env(safe-area-inset-top, 0px) + 8px)", left: "12px", right: "12px" }}
+    />
+  )
+}
+
 export function App() {
   const [sidebarOpen, setSidebarOpen] = useAutoSidebar()
+  useVisualViewportHeight()
 
   useWindowKeydown((event) => {
     if (isMod(event) && !event.altKey && event.key.toLowerCase() === "k") {
@@ -55,17 +83,23 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider delay={400}>
-        <SidebarProvider open={sidebarOpen} onOpenChange={setSidebarOpen} className="h-dvh overflow-hidden">
+        {/* --app-height: the visible height above an iOS soft keyboard (see useVisualViewportHeight). */}
+        <SidebarProvider
+          open={sidebarOpen}
+          onOpenChange={setSidebarOpen}
+          className="h-[var(--app-height,100dvh)] min-h-0 overflow-hidden"
+        >
           <AppSidebar />
-          <SidebarInset className="min-w-0 overflow-hidden">
-            <AppHeader />
+          {/* Landscape phones: keep content out of the notch and the rounded corners. */}
+          <SidebarInset className="min-w-0 overflow-hidden pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
+            <Header />
             <Main />
           </SidebarInset>
         </SidebarProvider>
         <JobsSheet />
         <InstallDialog />
         <UnsavedChangesDialog />
-        <Toaster position="bottom-right" />
+        <AppToaster />
       </TooltipProvider>
     </QueryClientProvider>
   )

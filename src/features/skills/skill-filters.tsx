@@ -34,7 +34,7 @@ export const SkillFilters = forwardRef<HTMLInputElement, SkillFiltersProps>(func
 
   return (
     <div className="flex flex-col gap-2 border-b p-3">
-      <InputGroup className="h-8">
+      <InputGroup className="h-8 pointer-coarse:h-11">
         <InputGroupAddon>
           <HugeiconsIcon icon={Search01Icon} strokeWidth={2} />
         </InputGroupAddon>
@@ -45,8 +45,14 @@ export const SkillFilters = forwardRef<HTMLInputElement, SkillFiltersProps>(func
           onKeyDown={onSearchKeyDown}
           placeholder="Search skills"
           aria-label="Search skills by name or description"
+          type="search"
+          enterKeyHint="search"
+          autoCapitalize="none"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
         />
-        <InputGroupAddon align="inline-end">
+        <InputGroupAddon align="inline-end" className="no-hover:hidden">
           <Kbd>/</Kbd>
         </InputGroupAddon>
       </InputGroup>
@@ -56,7 +62,7 @@ export const SkillFilters = forwardRef<HTMLInputElement, SkillFiltersProps>(func
           value={value.agent}
           onValueChange={(agent) => agent && onChange({ agent })}
         >
-          <SelectTrigger size="sm" className="w-full min-w-0 gap-1 px-2.5 text-xs" aria-label="Filter by agent">
+          <SelectTrigger size="sm" className="w-full min-w-0 gap-1 px-2.5 text-xs pointer-coarse:data-[size=sm]:h-11 pointer-coarse:text-sm" aria-label="Filter by agent">
             <SelectValue />
           </SelectTrigger>
           <SelectContent alignItemWithTrigger={false}>
@@ -73,7 +79,7 @@ export const SkillFilters = forwardRef<HTMLInputElement, SkillFiltersProps>(func
           value={value.origin}
           onValueChange={(origin) => origin && onChange({ origin: origin as SkillFilterState["origin"] })}
         >
-          <SelectTrigger size="sm" className="w-full min-w-0 gap-1 px-2.5 text-xs" aria-label="Filter by origin">
+          <SelectTrigger size="sm" className="w-full min-w-0 gap-1 px-2.5 text-xs pointer-coarse:data-[size=sm]:h-11 pointer-coarse:text-sm" aria-label="Filter by origin">
             <SelectValue />
           </SelectTrigger>
           <SelectContent alignItemWithTrigger={false}>

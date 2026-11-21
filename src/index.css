@@ -4,6 +4,23 @@
 @import "@fontsource-variable/geist-mono";
 
 @custom-variant dark (&:is(.dark *));
+/* No hover = no mouse to hover with: hide keyboard and hover-only hints. */
+@custom-variant no-hover (@media (hover: none));
+
+/* Press feedback for rows and list items: on at once, fades out on release.
+   :active works for every input; the fade only runs on touch so desktop
+   hover colors keep switching instantly. */
+@utility pressable {
+  &:active {
+    background-color: var(--color-muted);
+  }
+  @media (pointer: coarse) {
+    transition: background-color 150ms ease-out;
+    &:active {
+      transition-duration: 0ms;
+    }
+  }
+}
 
 @theme inline {
     --font-heading: var(--font-mono);
@@ -151,6 +168,21 @@
   a {
     touch-action: manipulation;
     }
+  /* Keep the native clear button of search fields for touch only; with a
+     mouse, Escape clears and the button would change the desktop look. */
+  @media (hover: hover) {
+    input[type="search"]::-webkit-search-cancel-button {
+      -webkit-appearance: none;
+      appearance: none;
+      }
+    }
+}
+
+/* CodeMirror is a contenteditable: iOS zooms into it under 16px too. */
+@media (pointer: coarse) {
+  .cm-editor.cm-editor {
+    font-size: 16px;
+  }
 }
 /* ---------- Syntax colors (editor and preview) ---------- */
 

@@ -21,7 +21,7 @@ export function SkillRow({ skill, selected, onSelect }: SkillRowProps) {
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "flex h-15 shrink-0 cursor-default flex-col justify-center gap-1 rounded-xl px-3 select-none hover:bg-muted/60",
+        "pressable flex h-15 shrink-0 cursor-default flex-col justify-center gap-1 rounded-xl px-3 select-none hover:bg-muted/60",
         selected && "bg-muted hover:bg-muted"
       )}
     >

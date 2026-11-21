@@ -92,10 +92,14 @@ function show(hash: string) {
   for (const listener of listeners) listener()
 }
 
-/** An in-app move: a new history entry, or replace the shown one. No events fire. */
+/**
+ * An in-app move: a new history entry, or replace the shown one. No events fire.
+ * A new entry remembers the hash it came from (smPrev), so goUp can tell
+ * whether Back leads to the parent place.
+ */
 function movePlace(hash: string, replace: boolean) {
-  if (replace) history.replaceState({ smIdx: shownIdx }, "", hash)
-  else history.pushState({ smIdx: ++shownIdx }, "", hash)
+  if (replace) history.replaceState({ ...(history.state as object | null), smIdx: shownIdx }, "", hash)
+  else history.pushState({ smIdx: ++shownIdx, smPrev: committedHash }, "", hash)
   show(hash)
 }
 
@@ -182,6 +186,30 @@ export function navigate(
   options: { force?: boolean; replace?: boolean } = {}
 ) {
   const current = getPlace()
+  const next = resolve(current, patch)
+  const hash = serialize(next)
+  if (hash === committedHash) return
+  const go = () => movePlace(hash, options.replace ?? false)
+  if (options.force || !leavesEditor(current, next)) go()
+  else confirmLeave(go)
+}
+
+/**
+ * Go up to a parent place (the back button of a stacked phone screen).
+ * When the entry before this one is that place, step Back in history, so
+ * the app's back button and the phone's Back button do the same thing.
+ * Otherwise (opened from a link or a reload of a deep place) replace this
+ * entry with the parent. Both paths ask first about unsaved changes.
+ */
+export function goUp(patch: Partial<Place>) {
+  const hash = serialize(resolve(getPlace(), patch))
+  if (hash === committedHash) return
+  const prev = (history.state as { smPrev?: unknown } | null)?.smPrev
+  if (prev === hash) history.back()
+  else navigate(patch, { replace: true })
+}
+
+function resolve(current: Place, patch: Partial<Place>): Place {
   const next = { ...current, ...patch }
   // A new scope resets the selection inside it; a new skill resets the file.
   if (patch.scope !== undefined && patch.scope !== current.scope) {
@@ -192,9 +220,5 @@ export function navigate(
   if (patch.skill !== undefined && patch.skill !== current.skill && !("file" in patch)) {
     next.file = null
   }
-  const hash = serialize(next)
-  if (hash === committedHash) return
-  const go = () => movePlace(hash, options.replace ?? false)
-  if (options.force || !leavesEditor(current, next)) go()
-  else confirmLeave(go)
+  return next
 }

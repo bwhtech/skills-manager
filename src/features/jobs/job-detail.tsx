@@ -31,7 +31,7 @@ export function JobDetail({ job }: { job: Job }) {
               : `Failed${finished.exitCode === null ? "" : ` · exit ${finished.exitCode}`}`}
         </span>
       </div>
-      <div className="flex items-start gap-1 rounded-2xl border px-3 py-2 font-mono text-xs">
+      <div className="flex items-start gap-1 rounded-2xl border px-3 py-2 font-mono text-xs pointer-coarse:items-center">
         <div className="min-w-0 flex-1">
           <div className="break-all">
             <span className="text-muted-foreground select-none">$ </span>

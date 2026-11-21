@@ -19,7 +19,7 @@ export function JobList({ jobs, selectedId, onSelect }: JobListProps) {
             onClick={() => onSelect(job.id)}
             aria-current={job.id === selectedId ? "true" : undefined}
             className={cn(
-              "flex h-9 w-full items-center gap-2.5 rounded-xl px-3 text-left text-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50",
+              "pressable flex h-9 w-full items-center gap-2.5 rounded-xl px-3 text-left text-sm outline-none hover:bg-muted pointer-coarse:h-11 focus-visible:ring-2 focus-visible:ring-ring/50",
               job.id === selectedId && "bg-muted font-medium"
             )}
           >

@@ -2,6 +2,7 @@ import { HugeiconsIcon } from "@hugeicons/react"
 import { CircleArrowUp02Icon, RefreshIcon } from "@hugeicons/core-free-icons"
 import { toast } from "sonner"
 import type { ScopeKey } from "@shared/api"
+import { InfoTip } from "@/components/info-tip"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
@@ -10,7 +11,8 @@ import { api, errorMessage, useCheckUpdates, useJobMutation, useUpdates } from "
 import { basename, plural, timeAgo } from "@/lib/format"
 import { showJob } from "@/features/jobs/job-store"
 
-export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName: string }) {
+/** Update check state and actions for a scope; shared by the desktop header and the phone menu. */
+export function useUpdateActions(scope: ScopeKey) {
   const updates = useUpdates()
   const check = useCheckUpdates()
   const run = useJobMutation(api.runUpdate)
@@ -40,23 +42,25 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
       ? `Checked ${timeAgo(status.checkedAt)}`
       : "Not checked yet"
 
+  return { status, checking, total, inScope, failed, summary, refresh, updateAll, updating: run.isPending }
+}
+
+export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName: string }) {
+  const { status, checking, total, inScope, failed, summary, refresh, updateAll, updating } = useUpdateActions(scope)
+
   return (
     <div className="flex items-center gap-1.5">
       {status && (total > 0 || status.error) && (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Badge
-                variant={status.error ? "destructive" : "default"}
-                tabIndex={0}
-                className="h-6 px-2 tabular-nums"
-              />
-            }
-          >
-            {status.error && total === 0 ? "Check failed" : plural(total, "update")}
-            {status.error && total > 0 && " · some failed"}
-          </TooltipTrigger>
-          <TooltipContent className="max-w-sm">
+        <InfoTip
+          render={
+            <Badge
+              variant={status.error ? "destructive" : "default"}
+              tabIndex={0}
+              className="h-6 px-2 tabular-nums"
+            />
+          }
+          contentClassName="max-w-sm"
+          content={
             <div className="flex flex-col gap-1">
               <span>{summary}</span>
               {total > 0 && (
@@ -77,12 +81,15 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
                 </ul>
               )}
             </div>
-          </TooltipContent>
-        </Tooltip>
+          }
+        >
+          {status.error && total === 0 ? "Check failed" : plural(total, "update")}
+          {status.error && total > 0 && " · some failed"}
+        </InfoTip>
       )}
       {inScope.length > 0 && (
-        <Button size="sm" className="h-7" disabled={run.isPending} onClick={updateAll}>
-          {run.isPending ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
+        <Button size="sm" className="h-7" disabled={updating} onClick={updateAll}>
+          {updating ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
           <span className="hidden xl:inline">Update all in {scopeName}</span>
           <span className="xl:hidden">Update {inScope.length}</span>
         </Button>

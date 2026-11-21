@@ -22,7 +22,7 @@ export function InstructionList({ files, selectedId, onSelect }: InstructionList
             onClick={() => onSelect(file.id)}
             aria-current={file.id === selectedId ? "true" : undefined}
             className={cn(
-              "flex h-15 w-full flex-col justify-center gap-1 rounded-xl px-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50",
+              "pressable flex h-15 w-full flex-col justify-center gap-1 rounded-xl px-3 text-left outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/50",
               file.id === selectedId && "bg-muted hover:bg-muted"
             )}
           >

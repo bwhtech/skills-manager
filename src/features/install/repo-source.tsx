@@ -50,16 +50,21 @@ export function RepoSource({ pick, onPick }: RepoSourceProps) {
           onChange={(event) => setSource(event.target.value)}
           placeholder="owner/repo or https://github.com/owner/repo"
           aria-label="Repository"
-          className="font-mono"
+          className="font-mono pointer-coarse:h-11"
           spellCheck={false}
           autoComplete="off"
+          // Text, not type=url: owner/repo is not a URL and would fail validation.
+          inputMode="url"
+          enterKeyHint="search"
+          autoCapitalize="none"
+          autoCorrect="off"
         />
-        <Button type="submit" variant="secondary" disabled={!source.trim() || list.isPending}>
+        <Button type="submit" variant="secondary" className="pointer-coarse:h-11" disabled={!source.trim() || list.isPending}>
           {list.isPending && <Spinner />}
           List skills
         </Button>
       </form>
-      <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border">
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-2xl border max-md:flex-none max-md:overflow-visible">
         {list.isPending ? (
           <p className="flex items-center gap-2 p-4 text-xs text-muted-foreground">
             <Spinner className="size-3.5" /> Reading the repository…
@@ -74,7 +79,7 @@ export function RepoSource({ pick, onPick }: RepoSourceProps) {
           <p className="p-4 text-xs text-muted-foreground">No skills found in {listed.source}.</p>
         ) : (
           <div className="flex flex-col p-1.5">
-            <label className="flex h-9 items-center gap-3 rounded-xl px-3 text-xs text-muted-foreground hover:bg-muted/60">
+            <label className="pressable flex h-9 items-center gap-3 rounded-xl px-3 text-xs text-muted-foreground hover:bg-muted/60 pointer-coarse:h-11">
               <Checkbox
                 checked={allOn}
                 indeterminate={chosen.size > 0 && !allOn}
@@ -87,7 +92,7 @@ export function RepoSource({ pick, onPick }: RepoSourceProps) {
             {listed.skills.map((skill) => (
               <label
                 key={skill.name}
-                className="flex cursor-default items-start gap-3 rounded-xl px-3 py-2 hover:bg-muted/60"
+                className="pressable flex cursor-default items-start gap-3 rounded-xl px-3 py-2 hover:bg-muted/60 pointer-coarse:py-3"
               >
                 <Checkbox
                   className="mt-0.5"

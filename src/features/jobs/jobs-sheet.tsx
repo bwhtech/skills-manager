@@ -26,12 +26,16 @@ export function JobsSheet() {
 
   return (
     <Sheet open={jobsOpen} onOpenChange={ui.setJobsOpen}>
-      <SheetContent side="right" className="w-full gap-0 data-[side=right]:sm:max-w-2xl">
-        <SheetHeader className="pb-3">
+      {/* Phones: full width; header and log clear the notch and the home indicator. */}
+      <SheetContent
+        side="right"
+        className="w-full gap-0 data-[side=right]:sm:max-w-2xl max-sm:data-[side=right]:w-full max-sm:data-[side=right]:border-l-0 pr-[env(safe-area-inset-right)] *:data-[slot=sheet-close]:top-[calc(1rem+env(safe-area-inset-top))] *:data-[slot=sheet-close]:right-[calc(1rem+env(safe-area-inset-right))] pointer-coarse:*:data-[slot=sheet-close]:size-11"
+      >
+        <SheetHeader className="pt-[calc(1.5rem+env(safe-area-inset-top))] pb-3 max-sm:px-4">
           <SheetTitle>Jobs</SheetTitle>
           <SheetDescription>Output of skills CLI runs on this server.</SheetDescription>
         </SheetHeader>
-        <div className="flex min-h-0 flex-1 flex-col gap-4 px-6 pb-6">
+        <div className="flex min-h-0 flex-1 flex-col gap-4 px-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))] max-sm:gap-3 max-sm:px-4 max-sm:pb-[calc(1rem+env(safe-area-inset-bottom))]">
           {jobs.isPending ? (
             <div className="flex flex-col gap-2">
               <Skeleton className="h-9" />
@@ -48,7 +52,7 @@ export function JobsSheet() {
             </Empty>
           ) : (
             <>
-              <div className="max-h-[30%] shrink-0 overflow-auto">
+              <div className="max-h-[30%] shrink-0 overflow-auto overscroll-contain">
                 <JobList jobs={list} selectedId={selected?.id ?? null} onSelect={ui.selectJob} />
               </div>
               {waiting && <Skeleton className="min-h-0 flex-1" />}

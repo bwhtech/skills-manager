@@ -10,9 +10,15 @@ function resolvedDark(theme: string) {
   return theme === "dark"
 }
 
-export function ThemeToggle() {
+/** Whether the page is dark now, and a function that flips it. */
+export function useThemeToggle() {
   const { theme, setTheme } = useTheme()
   const dark = resolvedDark(theme)
+  return { dark, toggle: () => setTheme(dark ? "light" : "dark") }
+}
+
+export function ThemeToggle() {
+  const { dark, toggle } = useThemeToggle()
   return (
     <Tooltip>
       <TooltipTrigger
@@ -21,7 +27,7 @@ export function ThemeToggle() {
             variant="ghost"
             size="icon-sm"
             aria-label={dark ? "Switch to light mode" : "Switch to dark mode"}
-            onClick={() => setTheme(dark ? "light" : "dark")}
+            onClick={toggle}
           />
         }
       >

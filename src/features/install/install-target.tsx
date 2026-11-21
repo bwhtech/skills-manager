@@ -29,11 +29,11 @@ export function InstallTarget(props: InstallTargetProps) {
     onAgentsChange(agents.map((a) => a.id).filter((agentId) => (agentId === id ? on : chosen.has(agentId))))
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 max-md:flex-none">
       <div className="grid gap-2">
         <Label>Install to</Label>
         <Select items={items} value={scope} onValueChange={(value) => value && onScopeChange(value)}>
-          <SelectTrigger className="w-full" aria-label="Install scope">
+          <SelectTrigger className="w-full pointer-coarse:data-[size=default]:h-11" aria-label="Install scope">
             <SelectValue />
           </SelectTrigger>
           <SelectContent alignItemWithTrigger={false}>
@@ -55,10 +55,10 @@ export function InstallTarget(props: InstallTargetProps) {
         <div
           role="group"
           aria-labelledby="install-agents-label"
-          className="min-h-0 flex-1 overflow-y-auto rounded-2xl border p-1.5"
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain rounded-2xl border p-1.5 max-md:flex-none max-md:overflow-visible"
         >
           {sorted.map((agent) => (
-            <label key={agent.id} className="flex h-8 items-center gap-3 rounded-xl px-2.5 text-sm hover:bg-muted/60">
+            <label key={agent.id} className="pressable flex h-8 items-center gap-3 rounded-xl px-2.5 text-sm hover:bg-muted/60 pointer-coarse:h-11">
               <Checkbox checked={chosen.has(agent.id)} onCheckedChange={(on) => toggle(agent.id, on)} />
               <span className="min-w-0 flex-1 truncate">{agent.label}</span>
               {agent.detected && <span className="text-xs text-muted-foreground">detected</span>}

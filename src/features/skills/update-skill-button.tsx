@@ -12,7 +12,7 @@ export function UpdateSkillButton({ skill }: { skill: SkillSummary }) {
   return (
     <Button
       size="sm"
-      className="h-7"
+      className="h-7 pointer-coarse:h-10"
       disabled={update.isPending}
       onClick={() =>
         update.mutate(

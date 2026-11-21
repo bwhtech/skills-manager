@@ -7,7 +7,12 @@ import { api, errorMessage, keys, useInstruction } from "@/lib/api"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { LinkedBadge } from "./linked-badge"
 
-export function InstructionEditor({ file }: { file: InstructionFile }) {
+interface InstructionEditorProps {
+  file: InstructionFile
+  onDirtyChange?: (dirty: boolean) => void
+}
+
+export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProps) {
   const client = useQueryClient()
   const content = useInstruction(file.id, file.exists)
 
@@ -33,6 +38,7 @@ export function InstructionEditor({ file }: { file: InstructionFile }) {
     <Suspense fallback={<EditorSkeleton />}>
       <DocumentEditor
         key={file.id}
+        draftKey={`doc:${file.id}`}
         path={file.path}
         title={file.fileName}
         file={content.data}
@@ -44,6 +50,7 @@ export function InstructionEditor({ file }: { file: InstructionFile }) {
         }
         onSave={save}
         onReload={async () => (await content.refetch()).data}
+        onDirtyChange={onDirtyChange}
       />
     </Suspense>
   )

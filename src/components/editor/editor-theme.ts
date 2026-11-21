@@ -12,9 +12,12 @@ export const editorTheme = EditorView.theme({
   ".cm-scroller": {
     fontFamily: "var(--font-mono)",
     lineHeight: "1.6",
+    // Scrolling past the end must not drag the page or the screen behind.
+    overscrollBehavior: "contain",
   },
   ".cm-content": {
-    padding: "12px 0",
+    // Last lines clear the home indicator on phones (0 elsewhere).
+    padding: "12px 0 calc(12px + env(safe-area-inset-bottom, 0px))",
     caretColor: "var(--foreground)",
   },
   ".cm-line": { padding: "0 16px 0 8px" },

@@ -19,6 +19,7 @@ import { api, errorMessage, useAgents, useJobMutation, useScopes } from "@/lib/a
 import { plural } from "@/lib/format"
 import { usePlace } from "@/lib/hash-state"
 import { ui, useUi } from "@/lib/ui-store"
+import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
 import { InstallTarget } from "./install-target"
 import { RepoSource } from "./repo-source"
@@ -29,8 +30,16 @@ export function InstallDialog() {
   const { installOpen } = useUi()
   return (
     <Dialog open={installOpen} onOpenChange={ui.setInstallOpen}>
-      <DialogContent className="flex h-[min(640px,calc(100svh-2rem))] flex-col gap-5 sm:max-w-3xl">
-        <DialogHeader>
+      {/* Phones: full screen, one scrolling body, footer above the home indicator. */}
+      <DialogContent
+        className={cn(
+          "flex h-[min(640px,calc(100svh-2rem))] flex-col gap-5 sm:max-w-3xl",
+          "max-md:inset-0 max-md:h-[var(--app-height,100dvh)] max-md:max-w-none max-md:translate-x-0 max-md:translate-y-0 max-md:gap-4 max-md:rounded-none max-md:px-4 max-md:pt-[calc(1.25rem+env(safe-area-inset-top))] max-md:pb-[calc(1rem+env(safe-area-inset-bottom))] max-md:ring-0",
+          "max-md:pr-[max(1rem,env(safe-area-inset-right))] max-md:pl-[max(1rem,env(safe-area-inset-left))]",
+          "max-md:*:data-[slot=dialog-close]:top-[calc(0.75rem+env(safe-area-inset-top))] max-md:*:data-[slot=dialog-close]:size-11"
+        )}
+      >
+        <DialogHeader className="max-md:pr-12">
           <DialogTitle>Install skills</DialogTitle>
           <DialogDescription>Find skills on skills.sh or in a GitHub repository.</DialogDescription>
         </DialogHeader>
@@ -80,13 +89,13 @@ function InstallForm() {
 
   return (
     <>
-      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] gap-5">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] gap-5 max-md:-mx-4 max-md:flex max-md:flex-col max-md:overflow-y-auto max-md:overscroll-contain max-md:px-4">
         <Tabs
           value={tab}
           onValueChange={(value) => setTab(value as "search" | "repo")}
-          className="min-h-0"
+          className="min-h-0 max-md:flex-none"
         >
-          <TabsList className="w-full shrink-0">
+          <TabsList className="w-full shrink-0 pointer-coarse:h-11!">
             <TabsTrigger value="search">Search skills.sh</TabsTrigger>
             <TabsTrigger value="repo">From repository</TabsTrigger>
           </TabsList>
@@ -116,8 +125,8 @@ function InstallForm() {
           />
         )}
       </div>
-      <DialogFooter className="items-center">
-        <p className="mr-auto min-w-0 truncate text-xs text-muted-foreground">
+      <DialogFooter className="items-center max-sm:grid max-sm:grid-cols-2">
+        <p className="mr-auto min-w-0 truncate text-xs text-muted-foreground max-sm:col-span-2 max-sm:mr-0">
           {pick && pick.skills.length > 0
             ? `${plural(pick.skills.length, "skill")} from ${pick.source} → ${plural(selectedAgents.length, "agent")}`
             : "Pick at least one skill."}
