@@ -73,7 +73,7 @@ export class SkillActions {
       req.scope === "user" ? "-g" : "-p",
       "-y",
     ]
-    const what = req.names.length ? req.names.join(", ") : "all skills"
+    const what = req.names.length ? skillList(req.names) : "all skills"
     return this.cliJob(
       "update",
       `Update ${what} (${scopeLabel(req.scope)})`,
@@ -327,6 +327,12 @@ export async function verifiedSkillsDir(
 function isUnsafeToDelete(path: string, home: string): boolean {
   const p = resolve(path)
   return p === home || isInside(p, home) || p.split("/").length < 4
+}
+
+/** Names for a job title: up to three by name, otherwise a count. The job log keeps the full list. */
+export function skillList(names: string[]): string {
+  if (names.length <= 3) return names.join(", ")
+  return `${names.length} skills`
 }
 
 function scopeLabel(scope: string): string {
