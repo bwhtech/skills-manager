@@ -5,6 +5,7 @@ import { agentRoutes } from "./routes/agents.ts"
 import { installRoutes } from "./routes/install.ts"
 import { instructionRoutes } from "./routes/instructions.ts"
 import { jobRoutes } from "./routes/jobs.ts"
+import { recoveryRoutes } from "./routes/recovery.ts"
 import { scopeRoutes } from "./routes/scopes.ts"
 import { skillRoutes } from "./routes/skills.ts"
 import { updateRoutes } from "./routes/updates.ts"
@@ -24,6 +25,7 @@ export function createApi(svc: Services): Hono {
     updateRoutes,
     installRoutes,
     jobRoutes,
+    recoveryRoutes,
   ]) {
     api.route("/", routes(svc))
   }

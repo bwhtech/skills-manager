@@ -57,7 +57,8 @@ function RemovableSkillButton({ skill }: { skill: SkillSummary }) {
   const plan = planQuery.data
   const scope = scopeLabel(skill.scope, projects)
   const where = skill.scope === "user" ? "user scope" : `project ${scope}`
-  const isTicked = (path: string) => ticked.get(path) ?? false
+  const tooLarge = new Set((plan?.copies ?? []).filter((copy) => copy.tooLargeToRemove).map((copy) => copy.path))
+  const isTicked = (path: string) => !tooLarge.has(path) && (ticked.get(path) ?? false)
   const tickedCopies = (plan?.copies ?? []).filter((copy) => isTicked(copy.path)).map((copy) => copy.path)
   const untickedBlocking = (plan?.copies ?? []).filter((copy) => copy.blocking && !isTicked(copy.path))
   const ready = !npx || (!!plan && (!plan.blocked || (plan.blockedUnlessCopies && untickedBlocking.length === 0)))

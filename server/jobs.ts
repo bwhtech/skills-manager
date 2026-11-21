@@ -12,7 +12,7 @@ export interface JobSpec {
   /** jobs with a remove step for deleted-upstream skills: the names it removes */
   remove?: Job["remove"]
   /** does the work and returns an exit code */
-  run: (log: JobLog) => Promise<number>
+  run: (log: JobLog, job: Job) => Promise<number>
   /** called once the job has finished, whatever the outcome */
   onDone?: (job: Job) => void
 }
@@ -85,7 +85,7 @@ export class JobManager {
     this.append(job, `$ ${spec.command}`)
     let code: number
     try {
-      code = await spec.run((line) => this.append(job, line))
+      code = await spec.run((line) => this.append(job, line), job)
     } catch (err) {
       this.append(job, `Error: ${(err as Error).message}`)
       code = 1

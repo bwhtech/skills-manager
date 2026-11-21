@@ -1,14 +1,14 @@
 import { useEffect, useState, useSyncExternalStore } from "react"
-import type { SkillDetail } from "@shared/api"
+import { decodeId, type SkillDetail } from "@shared/api"
 import { ScreenBar, StackScreen } from "@/components/layout/stack-screen"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
-import { errorMessage, HttpError, useSkill } from "@/lib/api"
+import { errorMessage, HttpError, useSkill, useSkills } from "@/lib/api"
 import { basename } from "@/lib/format"
 import { getDraft, isDraftDirty, subscribeDrafts } from "@/lib/drafts"
-import { goUp, navigate } from "@/lib/hash-state"
+import { goUp, navigate, usePlace } from "@/lib/hash-state"
 import { FileTree } from "./file-tree"
 import { EditorSkeleton, SKILL_MD, SkillFileEditor, skillDraftKey } from "./skill-file-editor"
 import { SkillHeader } from "./skill-header"
@@ -19,7 +19,7 @@ export function SkillDetailPane({ skillId, file }: { skillId: string; file: stri
   const [dirty, setDirty] = useState(false)
 
   if (skill.isPending) return <DetailSkeleton />
-  if (skill.isError) return <SkillError error={skill.error} />
+  if (skill.isError) return <SkillError skillId={skillId} error={skill.error} />
 
   const data = skill.data
   const path = filePath(data, file)
@@ -55,8 +55,9 @@ function filePath(skill: SkillDetail, file: string | null) {
   return file && known ? file : SKILL_MD
 }
 
-function SkillError({ error }: { error: Error }) {
+function SkillError({ skillId, error }: { skillId: string; error: Error }) {
   const gone = error instanceof HttpError && error.status === 404
+  useFollowMovedSkill(gone ? skillId : null)
   return (
     <Empty className="h-full">
       <EmptyHeader>
@@ -67,6 +68,27 @@ function SkillError({ error }: { error: Error }) {
       </EmptyHeader>
     </Empty>
   )
+}
+
+/**
+ * A skill's ID is its real path. An update can move the folder (the CLI may
+ * reinstall a copied skill into .agents/skills and leave a link where the
+ * folder was), so the open ID stops existing. Find the same skill in this
+ * scope (the old path is now one of its locations, or the folder name is
+ * unique) and open it in place of the old entry.
+ */
+function useFollowMovedSkill(goneId: string | null) {
+  const { scope } = usePlace()
+  const skills = useSkills(scope)
+  useEffect(() => {
+    if (!goneId || !skills.data) return
+    const oldPath = decodeId(goneId)
+    const folder = basename(oldPath)
+    const byLocation = skills.data.find((s) => s.id !== goneId && s.locations.includes(oldPath))
+    const byFolder = skills.data.filter((s) => basename(s.realPath) === folder)
+    const next = byLocation ?? (byFolder.length === 1 ? byFolder[0] : undefined)
+    if (next) navigate({ skill: next.id }, { replace: true })
+  }, [goneId, skills.data])
 }
 
 /**
@@ -99,7 +121,7 @@ export function SkillScreens({ skillId, file }: { skillId: string; file: string 
         {skill.isPending ? (
           <ScreenSkeleton />
         ) : skill.isError ? (
-          <SkillError error={skill.error} />
+          <SkillError skillId={skillId} error={skill.error} />
         ) : (
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-[env(safe-area-inset-bottom)]">
             <SkillHeader skill={skill.data} />

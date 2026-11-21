@@ -156,9 +156,10 @@ export interface FileContent {
 //   has baseHash (compared under a per-file lock keyed by the canonical path).
 // GET /api/skills/:id/removal-plan       -> RemovalPlan  (npx skills only; 400 otherwise)
 //   What DELETE would do. An explicit Remove counts a copy at an agent install path as part of
-//   the install when its content matches what the CLI installed for the lock entry (the
-//   canonical folder, or the project lock's computedHash): it is in willDelete. Other copies
-//   are opt-in (RemovalPlan.copies), as for deleted-upstream removal.
+//   the install only when the canonical folder exists, the copy's full inventory is identical
+//   to it, and the lock's recorded hash matches (RemovalPlan.promoted): it is in willDelete.
+//   Without a canonical folder a copy is never part of the install. Other copies are opt-in
+//   (RemovalPlan.copies), as for deleted-upstream removal.
 // DELETE /api/skills/:id  RemoveSkillRequest (optional body) -> JobRef
 //   npx skills: runs `skills remove -s <cliName> -a <agents> -y` (+ -g for user scope,
 //   cwd = project), after deleting the ticked copies. With a body, the same checks as
@@ -400,9 +401,11 @@ export interface RemovalPlan {
    */
   blockedUnlessCopies?: boolean
   /**
-   * Explicit Remove only: real-folder copies in willDelete that count as part of the install,
-   * with the evidence (an inventory-identical canonical folder or installMode "copy", and the
-   * lock's recorded hash matching by the CLI's own algorithm). Any other copy is in `copies`.
+   * Explicit Remove only: real-folder copies in willDelete that count as part of the install
+   * because they have the same content as the installed version: the canonical folder exists,
+   * the copy's full inventory is identical to it, and the lock's recorded hash matches by the
+   * CLI's own algorithm. This shows the same content, not that the CLI made the folder. Any
+   * other copy (and every copy when there is no canonical folder) is in `copies`.
    */
   promoted?: { path: string; reason: string }[]
 }
@@ -423,10 +426,16 @@ export interface RemovalCopy {
   identical: boolean
   /** entries that differ (added, removed or changed), when known */
   differences?: number
-  /** files in the copy (at most the preview limit, see tooLarge) */
+  /** files in the copy (at most the deletion cap, see tooLarge) */
   files: number
-  /** too many files or bytes to compare: not identical */
+  /** too many entries or bytes to compare (the deletion cap, see tooLargeToRemove): not identical */
   tooLarge?: boolean
+  /**
+   * The copy itself is over the deletion cap (20,000 entries or 500 MB), so it cannot be
+   * fingerprinted byte for byte and cannot be deleted here: ticking it is 400. Show its
+   * checkbox disabled. If it blocks the skill, the plan is blocked ("still_used").
+   */
+  tooLargeToRemove?: boolean
   /** short reason when not identical: `reasons` joined with "; " */
   reason?: string
   /**
@@ -551,6 +560,79 @@ export interface UpdateFileChange {
   tooLarge?: boolean // over 256 KB: compared by SHA-256; contents omitted, line counts 0
   linesAdded: number
   linesRemoved: number
+}
+
+// ---------- Recovery of interrupted removals ----------
+
+// A job stages each ticked copy in a hidden trash dir (`.skills-manager-trash-*`) inside its
+// own skills dir before `skills remove` runs, and records it first in a journal
+// (~/.config/skills-manager/removals/<jobId>.json, mode 600). The journal is deleted once every
+// copy is deleted or moved back. A journal left behind (a crash, a copy that could not be
+// moved back or deleted) is listed here until each copy is settled.
+//
+// GET  /api/recovery                          -> RecoveryStatus
+//   Read from the disk at request time. Journals of jobs still running are left out.
+// POST /api/recovery/restore  RecoveryRequest -> RecoveryResult
+//   Moves each listed copy back: mkdir of the original path (never over anything there), then
+//   rename into that empty dir, then a device/inode check. A copy that cannot go back stays in
+//   the trash dir, and its result says why.
+// POST /api/recovery/delete   RecoveryRequest -> RecoveryResult
+//   Deletes each listed copy for good, after checking that its trash dir is still in its
+//   verified skills dir, and that its device, inode and full content inventory match what the
+//   journal recorded. A copy that does not match is kept.
+// Only paths of that job's journal are acted on (400 otherwise; 404 when there is no such
+// journal). 409 job_running when the job is still queued or running.
+// Unknown leftovers (trash dirs no journal covers) are only listed, never touched by the
+// server. Nothing is restored or deleted at startup: only these requests act.
+//
+// Test hook: SKILLS_MANAGER_TEST_CRASH_AFTER_STAGE=1 makes the server kill itself (SIGKILL)
+// right after a removal job staged a group's ticked copies. Honored only under a fixture HOME
+// (HOME is not the user's passwd home) or NODE_ENV=test.
+
+export interface RecoveryStatus {
+  interruptedRemovals: InterruptedRemoval[]
+  /** `.skills-manager-trash-*` dirs in the known agent skills dirs that no journal covers */
+  unknownLeftovers: { path: string }[]
+}
+
+export interface InterruptedRemoval {
+  jobId: string
+  /** when the job started staging (ISO) */
+  at: string
+  /** copies still in a trash dir */
+  items: InterruptedCopy[]
+}
+
+export interface InterruptedCopy {
+  /** where the copy was */
+  original: string
+  /** where it is now, in a trash dir */
+  staged: string
+  /**
+   * staged: whole, as it was set aside (or about to be, when the job stopped right then).
+   * purge_failed: its delete threw or was interrupted part way (a crash after "purging" was
+   * recorded), so what is left is incomplete: neither restorable
+   * nor deletable here; delete it by hand.
+   */
+  status: "staged" | "purge_failed"
+  /** POST /api/recovery/restore can move it back (nothing is at `original`) */
+  restorable: boolean
+  /** POST /api/recovery/delete can delete it (checked again in full when asked) */
+  deletable: boolean
+  /** why it cannot be restored or deleted, e.g. "partially deleted, still in trash: <path>" */
+  reason?: string
+}
+
+export interface RecoveryRequest {
+  jobId: string
+  /** InterruptedCopy.staged paths of that job */
+  staged: string[]
+}
+
+export interface RecoveryResult {
+  results: { staged: string; ok: boolean; message: string }[]
+  /** the status after the action */
+  recovery: RecoveryStatus
 }
 
 // ---------- Install ----------

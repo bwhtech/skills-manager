@@ -1,8 +1,44 @@
+import { readFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 const home = homedir()
 const root = resolve(import.meta.dir, "..")
+
+/**
+ * Test hook: SKILLS_MANAGER_TEST_CRASH_AFTER_STAGE=1 kills the server (SIGKILL) right after a
+ * removal job has staged a group's ticked copies, to leave an interrupted removal behind.
+ * Honored only when NODE_ENV=test or HOME is not the user's own home from the passwd
+ * database (a fixture HOME). Never set it for the production unit.
+ */
+export function testCrashAllowed(env: Record<string, string | undefined>, home: string, passwdHome: string | null): boolean {
+  if (env.SKILLS_MANAGER_TEST_CRASH_AFTER_STAGE !== "1") return false
+  return env.NODE_ENV === "test" || (passwdHome !== null && resolve(passwdHome) !== resolve(home))
+}
+
+/**
+ * The user's home from the passwd database, or null. Not os.userInfo().homedir: Bun returns
+ * $HOME there, so a fixture HOME would look like the real one.
+ */
+function passwdHome(): string | null {
+  const uid = process.getuid?.()
+  if (uid === undefined) return null
+  let line = ""
+  try {
+    const out = Bun.spawnSync(["getent", "passwd", String(uid)], { stdout: "pipe", stderr: "ignore" })
+    line = out.exitCode === 0 ? out.stdout.toString().trim() : ""
+  } catch {
+    // No getent: fall through to /etc/passwd. If that fails too, the fixture-HOME gate stays off.
+  }
+  if (!line) {
+    try {
+      line = readFileSync("/etc/passwd", "utf8").split("\n").find((l) => l.split(":")[2] === String(uid)) ?? ""
+    } catch {
+      return null
+    }
+  }
+  return line.split(":")[5] || null
+}
 
 /** Static settings, read once from the environment. */
 export const config = {
@@ -14,6 +50,9 @@ export const config = {
   /** The CLI chunk that exports the agent table (skills 1.9.0 layout). */
   skillsAgentsModule: join(root, "node_modules/skills/dist/_chunks/remove.mjs"),
   stateFile: join(home, ".config/skills-manager/state.json"),
+  /** Test hook SKILLS_MANAGER_TEST_CRASH_AFTER_STAGE (see testCrashAllowed). */
+  testCrashAfterStage:
+    process.env.SKILLS_MANAGER_TEST_CRASH_AFTER_STAGE === "1" && testCrashAllowed(process.env, home, passwdHome()),
   globalLock: join(home, ".agents/.skill-lock.json"),
   canonicalSkillsDir: join(home, ".agents/skills"),
   claudeHome: process.env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude"),

@@ -10,6 +10,7 @@ import { SkillIndex } from "./discovery/skill-index.ts"
 import { JobManager } from "./jobs.ts"
 import { UpdatePreviewService } from "./preview/service.ts"
 import { RemovalGuard } from "./removal/guard.ts"
+import { RemovalRecovery } from "./removal/recovery.ts"
 import { StateStore } from "./state.ts"
 import { UpdateChecker } from "./updates.ts"
 
@@ -25,6 +26,7 @@ export interface Services {
   catalog: Catalog
   previews: UpdatePreviewService
   removals: RemovalGuard
+  recovery: RemovalRecovery
   /** test seam: how routes read a scope's lock file (default readScopeLock) */
   readLock?: LockReader
 }
@@ -59,6 +61,11 @@ export async function createServices(): Promise<Services> {
     skills.invalidate()
     updates.start()
   })
+  const recovery = new RemovalRecovery({
+    home: config.home,
+    running: () => jobs.unfinished().map((job) => job.id),
+    skillsDirs: () => removals.skillsDirs(projects.paths()),
+  })
   return {
     agents,
     projects,
@@ -80,11 +87,22 @@ export async function createServices(): Promise<Services> {
           previews.invalidate(scope, attempted)
           updates.markRemoved(scope, removed)
         },
+        ...(config.testCrashAfterStage
+          ? {
+              stage: {
+                afterGroupStaged: (paths: string[]) => {
+                  console.error(`SKILLS_MANAGER_TEST_CRASH_AFTER_STAGE: killing the server after staging ${paths.join(", ")}`)
+                  process.kill(process.pid, "SIGKILL")
+                },
+              },
+            }
+          : {}),
       },
       removals
     ),
     catalog: new Catalog(cli),
     previews,
     removals,
+    recovery,
   }
 }

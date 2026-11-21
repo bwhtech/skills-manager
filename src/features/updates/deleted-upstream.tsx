@@ -60,7 +60,8 @@ export function useDeletedChoices(
     else if (plan.blocked && !plan.blockedUnlessCopies) dropped.push({ item, reason: plan.blocked, plan })
     else items.push(item)
   }
-  const isCopyTicked = (path: string) => copyChoices.get(path) ?? false
+  const tooLarge = new Set(all.flatMap((item) => (planFor(item.name)?.copies ?? []).filter((c) => c.tooLargeToRemove).map((c) => c.path)))
+  const isCopyTicked = (path: string) => !tooLarge.has(path) && (copyChoices.get(path) ?? false)
   const untickedBlocking = (name: string) =>
     (planFor(name)?.copies ?? []).filter((copy) => copy.blocking && !isCopyTicked(copy.path))
   const isChecked = (name: string) =>
@@ -345,22 +346,29 @@ export function CopyList({
       <span className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">Separate copies</span>
       <ul className={cn("flex flex-col gap-1", inactive && "opacity-60")}>
         {list.map((copy) => {
-          const ticked = isTicked(copy.path)
+          // Over the deletion cap: it cannot be fingerprinted byte for byte, so it is never tickable.
+          const tooLarge = !!copy.tooLargeToRemove
+          const ticked = !tooLarge && isTicked(copy.path)
+          const off = disabled || tooLarge
           return (
             <li key={copy.path}>
               <label
                 className={cn(
                   "flex min-h-11 items-start gap-2.5 rounded-lg border border-dashed px-2.5 py-2 transition-colors",
                   ticked ? "border-destructive/40 bg-destructive/5" : "bg-background/60",
-                  disabled ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/40"
+                  off ? "cursor-not-allowed" : "cursor-pointer hover:bg-muted/40"
                 )}
               >
                 <Checkbox
                   className="mt-0.5"
                   checked={ticked}
-                  disabled={disabled}
+                  disabled={off}
                   onCheckedChange={(value) => onTick(copy.path, value)}
-                  aria-label={`Delete the separate copy ${copy.path} (${copy.identical ? "identical" : "differs"})`}
+                  aria-label={
+                    tooLarge
+                      ? `Too large to remove safely here: ${copy.path}`
+                      : `Delete the separate copy ${copy.path} (${copy.identical ? "identical" : "differs"})`
+                  }
                 />
                 <span className="flex min-w-0 flex-1 flex-col gap-1">
                   <span
@@ -377,6 +385,11 @@ export function CopyList({
                       <span className="text-amber-700 dark:text-amber-300">· keeps the skill while it exists</span>
                     )}
                   </span>
+                  {tooLarge && (
+                    <span className="text-xs text-destructive">
+                      Too large to remove safely here — delete it by hand: <span className="break-all">{copy.path}</span>
+                    </span>
+                  )}
                   <CopyReasons copy={copy} />
                 </span>
               </label>

@@ -17,6 +17,9 @@ import {
   type LinkInstructionResponse,
   type Job,
   type JobRef,
+  type RecoveryRequest,
+  type RecoveryResult,
+  type RecoveryStatus,
   type RemovalPlan,
   type RemoveSkillRequest,
   type RepoSkill,
@@ -147,6 +150,10 @@ export const api = {
   repoSkills: (source: string) => request<RepoSkill[]>("POST", "/api/repo/skills", { source }),
   install: (body: InstallRequest) => request<JobRef>("POST", "/api/install", body),
 
+  recovery: () => request<RecoveryStatus>("GET", "/api/recovery"),
+  restoreCopies: (body: RecoveryRequest) => request<RecoveryResult>("POST", "/api/recovery/restore", body),
+  deleteCopies: (body: RecoveryRequest) => request<RecoveryResult>("POST", "/api/recovery/delete", body),
+
   jobs: () => request<Job[]>("GET", "/api/jobs"),
   job: (id: string) => request<Job>("GET", `/api/jobs/${id}`),
   jobEventsUrl: (id: string) => `/api/jobs/${id}/events`,
@@ -166,6 +173,7 @@ export const keys = {
   updatePreview: (id: string) => ["update-preview", id] as const,
   search: (text: string) => ["search", text] as const,
   jobs: ["jobs"] as const,
+  recovery: ["recovery"] as const,
 }
 
 // ---------- Queries ----------
@@ -398,6 +406,11 @@ export function useIsBeingUpdated(scope: ScopeKey, name: string) {
   return useQuery(jobsQuery((jobs) => isBeingUpdated(runningUpdates(jobs), scope, name))).data ?? false
 }
 
+/** Removals a crash or a failed delete left in trash dirs (the recovery banner). */
+export function useRecovery() {
+  return useQuery({ queryKey: keys.recovery, queryFn: api.recovery, refetchOnMount: "always" })
+}
+
 // ---------- Mutations ----------
 
 export function useScopesMutation<TArg>(fn: (arg: TArg) => Promise<ScopesResponse>) {
@@ -427,7 +440,7 @@ export function useJobMutation<TArg>(fn: (arg: TArg) => Promise<JobRef>) {
 
 /** Refresh everything a finished job can change. Active queries refetch now, the rest on mount. */
 export function invalidateAfterJob(client: QueryClient) {
-  for (const key of [["skills"], ["skill"], keys.updates, keys.scopes, keys.jobs]) {
+  for (const key of [["skills"], ["skill"], keys.updates, keys.scopes, keys.jobs, keys.recovery]) {
     void client.invalidateQueries({ queryKey: key })
   }
 }

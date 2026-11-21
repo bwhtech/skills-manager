@@ -2,25 +2,23 @@ import { readdirSync } from "node:fs"
 import { lstat, readdir, readlink, realpath, stat } from "node:fs/promises"
 import { dirname, join, relative, resolve } from "node:path"
 import type { RemovalCopy, RemovalPlan, ScopeKey } from "../../shared/api.ts"
-import { verifiedSkillsDir } from "../actions.ts"
 import { config } from "../config.ts"
 import { lockFingerprint, type LockEntry, type SkillLock } from "../discovery/locks.ts"
 import { isDotProjectDir } from "../discovery/skill-locations.ts"
-import { HttpError } from "../lib/errors.ts"
 import { isInside } from "../lib/files.ts"
-import type { DiffLimits } from "../preview/folder-diff.ts"
-import { PREVIEW_LIMITS } from "../preview/limits.ts"
 import {
-  QUICK_MAX_ENTRIES,
+  DELETE_LIMITS,
   compareInventories,
-  folderHashBlindSpots,
   gitTreeHash,
   identityOf,
+  isTooLarge,
   ownDataReasons,
   takeInventory,
   type CopyIdentity,
   type Inventory,
+  type InventoryLimits,
 } from "./inventory.ts"
+import { verifiedSkillsDir } from "./staging.ts"
 
 /** One entry of the skills CLI agent table (skills 1.9.0, _chunks/remove.mjs `agents`). */
 export interface CliAgentDef {
@@ -57,14 +55,14 @@ export interface RemovalEnv {
   lock: SkillLock
   /**
    * "cleanup" (default): a deleted-upstream removal, where every independent copy is opt-in.
-   * "remove": an explicit Remove of the skill, where a copy with evidence that the CLI
-   * installed it for the lock entry is part of the install (see CopyJudge.provenance).
+   * "remove": an explicit Remove of the skill, where a copy with the same content as the
+   * installed version is part of the install (see CopyJudge.sameAsInstalled).
    */
   intent?: RemovalIntent
   /** per name: ticked copies, planned as if they were already deleted */
   gone?: ReadonlyMap<string, Iterable<string>>
-  /** test seam: the folder comparison limits (default PREVIEW_LIMITS) */
-  diffLimits?: DiffLimits
+  /** test seam: the deletion inventory cap (default DELETE_LIMITS) */
+  limits?: InventoryLimits
 }
 
 export type RemovalIntent = "cleanup" | "remove"
@@ -89,7 +87,7 @@ export interface PlannedRemoval extends RemovalPlan {
   /**
    * Fingerprints of every copy and every promoted copy, as this plan checked them. The job
    * deletes a ticked copy only while it still matches (server side; never from the client).
-   * null: the copy could not be fingerprinted, so it cannot be deleted here.
+   * null: the copy is over the deletion cap (tooLargeToRemove), so it cannot be deleted here.
    */
   identities: Record<string, CopyIdentity | null>
   /** lockFingerprint of the entry the plan was made from ("" when not locked) */
@@ -125,7 +123,8 @@ const EVE_SUBAGENTS = join("agent", "subagents")
  *   says "Successfully removed": the plan is blocked ("still_used") instead.
  * - Independent copies in a verified agent skills dir are listed in `copies`, never in
  *   willDelete. A name blocked only by copies is "copies" (blockedUnlessCopies): planned with
- *   those copies gone (env.gone), it is a normal plan.
+ *   those copies gone (env.gone), it is a normal plan. A blocking copy that is too large to
+ *   remove here cannot be ticked, so the name is then "still_used".
  */
 export async function planRemovals(
   env: RemovalEnv,
@@ -345,7 +344,8 @@ async function planOne(
 
   // The agent that keeps it with the ticked copies gone (else the first one on disk).
   const by = used.stillUsed[0] ?? real.stillUsed[0]
-  const unlock = blocking.size ? await evaluate(new Set([...blocking, ...ticked])) : null
+  const removable = [...blocking].every((p) => identities[p])
+  const unlock = blocking.size && removable ? await evaluate(new Set([...blocking, ...ticked])) : null
   if (unlock && unlock.stillUsed.length === 0) {
     const missing = [...blocking].filter((p) => !ticked.has(p)).sort()
     const plan = finish(unlock, {
@@ -355,6 +355,10 @@ async function planOne(
     })
     if (plan) return { ...plan, agents: [], deleteCopies: [] }
   }
+  const tooLarge = [...blocking].filter((p) => !identities[p]).sort()
+  const why = tooLarge.length
+    ? `Too large to remove safely here — delete it by hand: ${tooLarge.join(", ")}`
+    : "Move or delete that folder by hand first."
   const keptAll = canonicalInfo
     ? [
         ...kept,
@@ -366,7 +370,7 @@ async function planOne(
     : kept
   return blocked(
     "still_used",
-    `${by.label} has an independent folder at ${by.installPath}. The skills CLI would keep ${canonical} and the lock entry while it exists, so nothing can be removed cleanly. Move or delete that folder by hand first.`,
+    `${by.label} has an independent folder at ${by.installPath}. The skills CLI would keep ${canonical} and the lock entry while it exists, so nothing can be removed cleanly. ${why}`,
     keptAll,
     copies
   )
@@ -404,8 +408,8 @@ type Verdict =
 /**
  * The canonical folder (also through a linked parent dir), a link to it (also a dangling one),
  * an independent copy that may be offered for deletion, or something else, which is never ours
- * to delete. In an explicit Remove, a copy with evidence that the CLI installed it for this
- * lock entry is part of the install ("safe", promoted); see CopyJudge.provenance.
+ * to delete. In an explicit Remove, a copy with the same content as the installed version is
+ * part of the install ("safe", promoted); see CopyJudge.sameAsInstalled.
  */
 async function classify(
   path: string,
@@ -428,9 +432,11 @@ async function classify(
   if (!info.isDirectory()) return { kind: "independent", reason: "not a skill folder" }
   const why = await judge.notOffered(path)
   if (why) return { kind: "independent", reason: why }
-  const { info: copy, inventory, identity } = await judge.compare(path)
+  const compared = await judge.compare(path)
+  if ("unreadable" in compared) return { kind: "independent", reason: compared.unreadable }
+  const { info: copy, inventory, identity } = compared
   if (judge.explicit && inventory && identity) {
-    const reason = await judge.provenance(path, copy, inventory)
+    const reason = await judge.sameAsInstalled(path, copy, inventory)
     if (reason) return { kind: "safe", promoted: { reason, identity } }
   }
   return { kind: "copy", info: copy, identity }
@@ -480,27 +486,34 @@ class CopyJudge {
   }
 
   /**
-   * The copy against the canonical folder by full deletion inventories (inventory.ts), with
-   * the preview's limits: identical only when every entry matches and the copy holds nothing a
-   * CLI copy never has. Also the copy's identity for the job (a metadata walk when it is too
-   * large to read), and its inventory when it was read in full.
+   * The copy against the canonical folder by full deletion inventories (inventory.ts), within
+   * the deletion cap: identical only when every entry matches and the copy holds nothing a CLI
+   * copy never has. Also the copy's identity for the job: a hash of every byte. Past the cap
+   * there is no identity (tooLargeToRemove). A copy that cannot be read for another reason is
+   * not offered at all (`unreadable`).
    */
-  async compare(path: string): Promise<{ info: CopyInfo; inventory: Inventory | null; identity: CopyIdentity | null }> {
-    const limits = this.env.diffLimits ?? PREVIEW_LIMITS
-    const bounds = { maxEntries: limits.maxFilesPerSide, maxReadBytes: limits.maxReadBytes }
+  async compare(
+    path: string
+  ): Promise<{ info: CopyInfo; inventory: Inventory | null; identity: CopyIdentity | null } | { unreadable: string }> {
+    const limits = this.env.limits ?? DELETE_LIMITS
     let copy: Inventory
     try {
-      copy = await takeInventory(path, bounds)
+      copy = await takeInventory(path, limits)
     } catch (err) {
-      const quick = await takeInventory(path, { maxEntries: QUICK_MAX_ENTRIES, maxReadBytes: 0 }, { content: false }).catch(() => null)
-      const files = quick ? fileCount(quick) : limits.maxFilesPerSide
-      const reasons = quick ? ownDataReasons(quick) : []
-      const tooLarge = err instanceof HttpError && err.status === 413
-      const first = tooLarge ? "too large to compare" : `could not compare (${(err as Error).message})`
+      if (!isTooLarge(err)) return { unreadable: `independent copy that could not be read (${(err as Error).message})` }
+      const quick = await takeInventory(path, { maxEntries: limits.maxEntries, maxReadBytes: 0 }, { content: false }).catch(() => null)
+      const reasons = ["too large to compare", ...(quick ? ownDataReasons(quick) : [])]
       return {
-        info: { identical: false, files, ...(tooLarge ? { tooLarge: true } : {}), reason: [first, ...reasons].join("; "), reasons: [first, ...reasons] },
+        info: {
+          identical: false,
+          files: quick ? fileCount(quick) : limits.maxEntries,
+          tooLarge: true,
+          tooLargeToRemove: true,
+          reason: reasons.join("; "),
+          reasons,
+        },
         inventory: null,
-        identity: quick ? identityOf(quick) : null,
+        identity: null,
       }
     }
     const identity = identityOf(copy)
@@ -511,9 +524,9 @@ class CopyJudge {
     }
     let canonical: Inventory
     try {
-      canonical = await takeInventory(await realpath(this.canonical), bounds)
+      canonical = await takeInventory(await realpath(this.canonical), limits)
     } catch (err) {
-      const tooLarge = err instanceof HttpError && err.status === 413
+      const tooLarge = isTooLarge(err)
       const reasons = [tooLarge ? "too large to compare" : `could not compare (${(err as Error).message})`, ...ownDataReasons(copy)]
       return {
         info: { identical: false, files, ...(tooLarge ? { tooLarge: true } : {}), reason: reasons.join("; "), reasons },
@@ -530,35 +543,24 @@ class CopyJudge {
 
   /**
    * Explicit Remove: why the copy counts as part of the install, or null (it stays opt-in).
-   * Both must hold:
-   * - a matching full inventory: with a canonical folder, the copy is inventory-identical to
-   *   it; without one, the lock's hash must cover every entry (folderHashBlindSpots);
-   * - provenance: the hash the lock recorded for this entry matches the copy by the CLI's own
-   *   algorithm (a 64-hex computedHash or skillFolderHash: computeSkillFolderHash; a 40-hex
-   *   GitHub skillFolderHash: the Git tree id), AND either the lock says installMode "copy"
-   *   or the canonical folder exists and is inventory-identical.
-   * Never when the lock says installMode "symlink": a real folder is then not the CLI's doing.
+   * Only with a canonical folder, never without one: the copy must be inventory-identical to
+   * it (every entry, byte and permission bit), and the hash the lock recorded for this entry
+   * must match by the CLI's own algorithm (a 64-hex computedHash or skillFolderHash:
+   * computeSkillFolderHash; a 40-hex GitHub skillFolderHash: the Git tree id). That shows the
+   * same content as the installed version, not that the CLI made this folder. Never when the
+   * lock says installMode "symlink": a real folder is then not the CLI's doing.
    */
-  async provenance(path: string, copy: CopyInfo, inv: Inventory): Promise<string | null> {
-    const mode = this.entry.installMode
-    if (mode === "symlink") return null
-    if (this.canonical ? !copy.identical : mode !== "copy") return null
-    if (!this.canonical && folderHashBlindSpots(inv).length) return null
+  async sameAsInstalled(path: string, copy: CopyInfo, inv: Inventory): Promise<string | null> {
+    if (!this.canonical || !copy.identical || this.entry.installMode === "symlink") return null
     const hashes = [this.entry.computedHash, this.entry.skillFolderHash].filter((h): h is string => !!h)
     for (const recorded of hashes) {
       if (/^[0-9a-f]{40}$/.test(recorded) && gitTreeHash(inv) === recorded)
-        return this.promotedReason("its Git tree id matches the lock's skillFolderHash")
+        return "same content as installed version: same files, links and permissions as the canonical folder, and the lock's skillFolderHash (Git tree id) matches"
       const cliHash = this.env.cli.computeSkillFolderHash
       if (/^[0-9a-f]{64}$/.test(recorded) && cliHash && (await cliHash(path).catch(() => null)) === recorded)
-        return this.promotedReason("its CLI folder hash matches the lock")
+        return "same content as installed version: same files, links and permissions as the canonical folder, and the lock's folder hash matches"
     }
     return null
-  }
-
-  private promotedReason(hash: string): string {
-    return this.canonical
-      ? `copy the skills CLI installed: same files, links and permissions as the canonical folder, and ${hash}`
-      : `copy the skills CLI installed (installMode "copy"): ${hash}`
   }
 }
 
@@ -579,6 +581,21 @@ export function invalidNameReason(name: string): string | null {
 }
 
 /** getCanonicalSkillsDir */
+/**
+ * The agent skills dirs of the user scope and of these projects (only dot folders there):
+ * where a removal can stage copies in a trash dir.
+ */
+export function agentSkillsDirs(agents: AgentTable, home: string, projects: readonly string[]): string[] {
+  const dirs = new Set<string>([canonicalDir(true, home, home)])
+  for (const agent of Object.values(agents)) dirs.add(agentBaseDir(agent, true, home, home))
+  for (const project of projects) {
+    dirs.add(canonicalDir(false, project, home))
+    for (const agent of Object.values(agents))
+      if (isDotProjectDir(agent.skillsDir)) dirs.add(agentBaseDir(agent, false, project, home))
+  }
+  return [...dirs].sort()
+}
+
 function canonicalDir(global: boolean, cwd: string, home: string): string {
   return join(global ? home : cwd, CANONICAL)
 }

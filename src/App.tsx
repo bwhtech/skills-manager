@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip"
 import { InstallDialog } from "@/features/install/install-dialog"
 import { InstructionsView } from "@/features/instructions/instructions-view"
 import { JobsSheet } from "@/features/jobs/jobs-sheet"
+import { RecoveryBanner } from "@/features/recovery/recovery-banner"
 import { AppSidebar } from "@/features/scopes/app-sidebar"
 import { SkillsView } from "@/features/skills/skills-view"
 import { useIsDesktop } from "@/hooks/use-media-query"
@@ -109,6 +110,7 @@ export function App() {
           {/* Landscape phones: keep content out of the notch and the rounded corners. */}
           <SidebarInset className="min-w-0 overflow-hidden pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]">
             <Header />
+            <RecoveryBanner />
             <Main />
           </SidebarInset>
         </SidebarProvider>
