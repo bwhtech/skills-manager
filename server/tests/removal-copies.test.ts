@@ -5,6 +5,7 @@ import type { RemovalPlan } from "../../shared/api.ts"
 import { readLock, readLockStrict } from "../discovery/locks.ts"
 import type { IndexedSkill } from "../discovery/skill-index.ts"
 import type { HttpError } from "../lib/errors.ts"
+import { checkShown } from "../removal/guard.ts"
 import { planRemovals } from "../removal/plan.ts"
 import { deletedCheck, makeFixture, settle, shownPlans, wire, type Fixture } from "./removal-harness.ts"
 
@@ -71,22 +72,53 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
     expect(edited.copies?.[0]).toMatchObject({ identical: false, differences: 1, reason: "1 file changed (SKILL.md)" })
   })
 
-  test("a copy over the preview limits is too large to compare, so not identical", async () => {
-    const { fx, claude } = await withCopies()
+  test("a copy over the deletion cap is too large to remove: never tickable, and a blocking one keeps the skill blocked", async () => {
+    const { fx, claude, other } = await withCopies()
     const cli = await fx.loadCli()
-    const [plan] = await planRemovals(
-      {
-        scope: "user",
-        home: fx.home,
-        agents: cli.agents,
-        cli,
-        lock: await fx.readLock("user"),
-        diffLimits: { maxFilesPerSide: 10, maxReadBytes: 10, readConcurrency: 1 },
-      },
-      ["gone"]
-    )
+    const env = { scope: "user", home: fx.home, agents: cli.agents, cli, lock: await fx.readLock("user"), limits: { maxEntries: 10, maxReadBytes: 10 } }
+    const [plan] = await planRemovals(env, ["gone"])
     const copy = plan.copies.find((c) => c.path === claude)
-    expect(copy).toMatchObject({ identical: false, tooLarge: true, reason: "too large to compare" })
+    expect(copy).toMatchObject({ identical: false, tooLarge: true, tooLargeToRemove: true, reason: "too large to compare", blocking: true })
+    expect(plan.identities[claude] ?? null).toBeNull()
+    // The blocking copy cannot be ticked, so the name is blocked outright, not "tick to unlock".
+    expect(plan.blockCode).toBe("still_used")
+    expect(plan.blockedUnlessCopies).toBeUndefined()
+    expect(plan.blocked).toContain(`Too large to remove safely here — delete it by hand: ${claude}`)
+    // Ticked anyway: refused at request time (400), never mid-job.
+    const [ticked] = await planRemovals({ ...env, gone: new Map([["gone", [claude, other]]]) }, ["gone"])
+    const refusal = checkShown(ticked, {
+      willDelete: ticked.willDelete,
+      copies: [claude],
+      shownCopies: ticked.copies.map((c) => ({ path: c.path, identical: c.identical })),
+    })
+    expect(refusal?.status).toBe(400)
+    expect(refusal?.detail).toBe(`gone: Too large to remove safely here — delete it by hand: ${claude}`)
+  })
+
+  test("an oversized copy in an explicit Remove: the request is refused before any job starts", async () => {
+    const fx = await makeFixture()
+    await fx.writeLock({ foo: {} })
+    await fx.skill(".agents/skills", "foo")
+    const copy = await fx.skill(".claude/skills", "foo")
+    const cli = await fx.loadCli()
+    const w = await wire(fx, {})
+    const [plan] = await planRemovals(
+      { scope: "user", home: fx.home, agents: cli.agents, cli, lock: await fx.readLock("user"), intent: "remove", limits: { maxEntries: 10, maxReadBytes: 10 }, gone: new Map([["foo", [copy]]]) },
+      ["foo"]
+    )
+    let refused: HttpError | null = null
+    try {
+      w.actions.remove({ origin: "npx", scope: "user", cliName: "foo", name: "foo", placements: [] } as unknown as IndexedSkill, plan, {
+        willDelete: plan.willDelete,
+        copies: [copy],
+        shownCopies: [{ path: copy, identical: false }],
+      })
+    } catch (err) {
+      refused = err as HttpError
+    }
+    expect(refused?.status).toBe(400)
+    expect(w.jobs.list()).toEqual([])
+    expect(await exists(join(copy, "SKILL.md"))).toBe(true)
   })
 
   test("an unticked blocking copy: refused with removal_blocked, nothing touched", async () => {
@@ -285,7 +317,7 @@ describe("explicit Remove of a copy-mode install (review round 7, item 3)", () =
     expect(plan.promoted).toEqual([
       {
         path: copy,
-        reason: "copy the skills CLI installed: same files, links and permissions as the canonical folder, and its CLI folder hash matches the lock",
+        reason: "same content as installed version: same files, links and permissions as the canonical folder, and the lock's folder hash matches",
       },
     ])
     // A deleted-upstream cleanup still treats it as an opt-in copy.
@@ -343,18 +375,20 @@ describe("explicit Remove of a copy-mode install (review round 7, item 3)", () =
     expect(plan.copies.map((c) => [c.path, c.identical])).toEqual([[copy, true]])
   })
 
-  test("global copy-only install: a copy whose CLI hash equals skillFolderHash is part of the install", async () => {
+  test("global copy-only install (no canonical folder): never part of the install, even with a matching hash", async () => {
     const fx = await makeFixture()
     const copy = await fx.skill(".claude/skills", "foo")
     const cli = await fx.loadCli()
     await fx.writeLock({ foo: { installMode: "copy", skillFolderHash: await cli.computeSkillFolderHash!(copy) } })
     const w = await wire(fx, {})
     const [plan] = await w.guard.plans("user", ["foo"], { intent: "remove" })
-    expect(plan.blocked).toBeUndefined()
-    expect(plan.willDelete).toEqual([copy])
+    expect(plan.promoted).toBeUndefined()
+    expect(plan.willDelete).toEqual([])
+    expect(plan.blockedUnlessCopies).toBe(true) // claude-code is detected: the opt-in copy blocks
+    expect(plan.copies.map((c) => [c.path, c.identical, c.reasons])).toEqual([[copy, false, ["no canonical folder to compare with"]]])
   })
 
-  test("in a project, a copy whose CLI hash equals the lock's computedHash is part of the install", async () => {
+  test("in a project without a canonical folder, a copy matching the lock's computedHash stays opt-in", async () => {
     const fx = await makeFixture()
     const project = join(fx.home, "proj")
     const copy = join(project, ".claude/skills/foo")
@@ -366,18 +400,13 @@ describe("explicit Remove of a copy-mode install (review round 7, item 3)", () =
       lastSelectedAgents: [],
       skills: new Map([["foo", { source: "owner/repo", computedHash, ...(installMode ? { installMode } : {}) }]]),
     })
-    // Without a canonical folder and without installMode "copy", a hash match is not enough.
-    const bare = { scope: project, home: fx.home, agents: cli.agents, cli, lock: lockOf() }
-    const [unproven] = await planRemovals({ ...bare, intent: "remove" }, ["foo"])
-    expect(unproven.willDelete).toEqual([])
-    expect(unproven.copies.map((c) => c.path)).toEqual([copy])
-    const env = { ...bare, lock: lockOf("copy") }
-    const [match] = await planRemovals({ ...env, intent: "remove" }, ["foo"])
-    expect(match.willDelete).toEqual([copy])
-    await writeFile(join(copy, "SKILL.md"), "---\nname: foo\ndescription: edited\n---\n")
-    const [edited] = await planRemovals({ ...env, intent: "remove" }, ["foo"])
-    expect(edited.willDelete).toEqual([])
-    expect(edited.copies.map((c) => c.path)).toEqual([copy])
+    for (const installMode of [undefined, "copy"]) {
+      const env = { scope: project, home: fx.home, agents: cli.agents, cli, lock: lockOf(installMode), intent: "remove" as const }
+      const [plan] = await planRemovals(env, ["foo"])
+      expect(plan.willDelete).toEqual([])
+      expect(plan.promoted).toBeUndefined()
+      expect(plan.copies.map((c) => c.path)).toEqual([copy])
+    }
   })
 })
 

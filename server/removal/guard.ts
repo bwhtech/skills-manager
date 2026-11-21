@@ -19,6 +19,7 @@ import { HttpError, badRequest } from "../lib/errors.ts"
 import type { UpstreamState } from "../preview/service.ts"
 import { sameIdentity } from "./inventory.ts"
 import {
+  agentSkillsDirs,
   invalidNameReason,
   planRemovals,
   type AgentTable,
@@ -124,6 +125,11 @@ export class RemovalGuard {
       { scope, home: this.home, agents: cli.agents, cli, lock, ...options },
       names
     )
+  }
+
+  /** The agent skills dirs of the user scope and of these projects (where trash dirs can be). */
+  async skillsDirs(projects: readonly string[]): Promise<string[]> {
+    return agentSkillsDirs((await this.cli()).agents, this.home, projects)
   }
 
   /** The public plans of every deletion record (for UpdateStatus.removalPlans). */
@@ -405,7 +411,8 @@ export class RemovalGuard {
 
 /**
  * Why a plan (made with the ticked copies as gone) must not run with what the dialog showed,
- * else null. 400: a ticked path that is not a copy of the name. 409 removal_plan_changed: the
+ * else null. 400: a ticked path that is not a copy of the name, or a copy too large to remove
+ * here (tooLargeToRemove: refused at request time, never mid-job). 409 removal_plan_changed: the
  * copies or their identical flags changed, or the plan would delete a path the dialog did not
  * show. 409 removal_blocked: a blocking copy is not ticked, or the name is blocked otherwise.
  */
@@ -435,6 +442,9 @@ export function checkShown(plan: PlannedRemoval, shown: ShownRemovalPlan): HttpE
   const notCopies = ticked.filter((path) => !current.has(path))
   if (notCopies.length)
     return badRequest(`${plan.name}: ${notCopies.join(", ")} is not a separate copy of it that can be deleted`)
+  const tooLarge = ticked.filter((path) => current.get(path)?.tooLargeToRemove || !plan.identities[path])
+  if (tooLarge.length)
+    return badRequest(`${plan.name}: Too large to remove safely here — delete it by hand: ${tooLarge.join(", ")}`)
   if (plan.blockCode === "collision") return new HttpError(409, "removal_conflict", plan.blocked)
   if (plan.blockedUnlessCopies) {
     const unticked = plan.copies.filter((c) => c.blocking && !ticked.includes(c.path)).map((c) => c.path)

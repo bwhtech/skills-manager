@@ -19,6 +19,16 @@ void services.skills
   .catch((err) => console.error("skill discovery failed:", err))
 services.updates.start()
 
+// Report removals a crash left behind. Nothing is restored or deleted here: only the banner does.
+void services.recovery
+  .status()
+  .then(({ interruptedRemovals, unknownLeftovers }) => {
+    const copies = interruptedRemovals.reduce((n, r) => n + r.items.length, 0)
+    if (copies) console.warn(`${copies} separate cop${copies === 1 ? "y is" : "ies are"} set aside by an interrupted removal; see the banner.`)
+    if (unknownLeftovers.length) console.warn(`Unknown trash dirs: ${unknownLeftovers.map((l) => l.path).join(", ")}`)
+  })
+  .catch((err) => console.error("could not read removal journals:", err))
+
 export default {
   port: config.port,
   hostname: config.host,

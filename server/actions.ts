@@ -1,6 +1,5 @@
-import type { Stats } from "node:fs"
 import { lstat, mkdir, rename, rm, rmdir, unlink } from "node:fs/promises"
-import { basename, dirname, join, relative, resolve } from "node:path"
+import { basename, dirname, join } from "node:path"
 import {
   updateTargetsOverlap,
   type InstallRequest,
@@ -19,19 +18,25 @@ import {
 } from "./discovery/skill-index.ts"
 import { cleanLine } from "./lib/ansi.ts"
 import { forbidden, HttpError } from "./lib/errors.ts"
-import { isInside, realpathOrNull } from "./lib/files.ts"
+import { realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
 import { checkShown, logCopies, type RemovalGuard, type ShownPlans } from "./removal/guard.ts"
-import {
-  QUICK_MAX_ENTRIES,
-  fullDigest,
-  quickDigest,
-  sameIdentity,
-  takeInventory,
-  type CopyIdentity,
-} from "./removal/inventory.ts"
+import { sameIdentity, type CopyIdentity } from "./removal/inventory.ts"
+import { RemovalJournal, journalDir } from "./removal/journal.ts"
 import type { PlannedRemoval } from "./removal/plan.ts"
-import { PREVIEW_LIMITS } from "./preview/limits.ts"
+import {
+  TRASH_PREFIX,
+  checkTrashed,
+  isUnsafeToDelete,
+  purgeStaged,
+  restoreStaged,
+  stageCopy,
+  verifiedSkillsDir,
+  type StageHooks,
+  type StagedCopy,
+} from "./removal/staging.ts"
+
+export { verifiedSkillsDir, type StageHooks, type StagedCopy }
 
 /** How an update step went. */
 export interface UpdateOutcome {
@@ -76,6 +81,20 @@ export interface UpdateJobRequest {
     shown: ShownPlans
   }
 }
+
+/** A ticked copy that stayed in a trash dir after its job (see GET /api/recovery). */
+export interface SetAside {
+  original: string
+  staged: string
+  /** staged: whole, can be restored or deleted; purge_failed: partly deleted */
+  status: "staged" | "purge_failed"
+}
+
+/**
+ * Where each staged copy of a job is. "purging": its delete is running or threw before it
+ * returned, so it is never moved back.
+ */
+type CopyStates = Map<StagedCopy, "staged" | "restored" | "deleted" | "purging" | "purge_failed" | "stranded">
 
 interface StepResult {
   code: number
@@ -158,7 +177,7 @@ export class SkillActions {
     let outcome: UpdateOutcome | null = null
     let removed: string[] = []
 
-    const run = async (log: JobLog): Promise<number> => {
+    const run = async (log: JobLog, job: Job): Promise<number> => {
       if (!removeOnly) {
         if (remove.length) log(`Step 1 of 2: ${this.cli.display(updateArgs)}`)
         const step = await this.runStep(updateArgs, cwd, log)
@@ -175,16 +194,16 @@ export class SkillActions {
         log("Step 2 of 2: remove the deleted-upstream skills")
       }
       const guard = this.guard as RemovalGuard
-      const result = await this.removeConfirmed(guard, scope, remove, shown, cwd, log, expected)
+      const result = await this.removeConfirmed(guard, scope, remove, shown, cwd, log, expected, job.id)
       removed = result.removed
       return result.ok ? 0 : 1
     }
 
-    const what = names.length ? names.join(", ") : "all skills"
+    const what = names.length ? skillList(names) : "all skills"
     const title = removeOnly
-      ? `Remove ${remove.join(", ")} (deleted upstream, ${scopeLabel(scope)})`
+      ? `Remove ${skillList(remove)} (deleted upstream, ${scopeLabel(scope)})`
       : remove.length
-        ? `Update ${what}, remove ${remove.join(", ")} (${scopeLabel(scope)})`
+        ? `Update ${what}, remove ${skillList(remove)} (${scopeLabel(scope)})`
         : `Update ${what} (${scopeLabel(scope)})`
     return this.jobs.enqueue({
       kind: removeOnly ? "remove" : "update",
@@ -220,7 +239,8 @@ export class SkillActions {
     shown: ShownPlans,
     cwd: string,
     log: JobLog,
-    expected: ReadonlyMap<string, CopyIdentity | null>
+    expected: ReadonlyMap<string, CopyIdentity | null>,
+    jobId: string
   ): Promise<{ ok: boolean; removed: string[] }> {
     let prepared
     try {
@@ -233,7 +253,7 @@ export class SkillActions {
       log("Nothing was removed.")
       return { ok: prepared.failed.length === 0, removed: [] }
     }
-    const result = await this.runRemoval(guard, scope, prepared.groups.flatMap((g) => g.plans), cwd, log, expected)
+    const result = await this.runRemoval(guard, scope, prepared.groups.flatMap((g) => g.plans), cwd, log, expected, jobId)
     return { ok: result.ok && prepared.failed.length === 0, removed: result.removed }
   }
 
@@ -244,11 +264,16 @@ export class SkillActions {
    *    inode and inventory digests recorded server side when the request was planned).
    * 2. Re-check the group with the ticked copies assumed gone (guard.recheck "present").
    * 3. Stage each ticked copy: checked again right before (device, inode, metadata walk),
-   *    moved into a trash dir in its own skills dir, checked after the move (device, inode,
-   *    full inventory). Any mismatch moves it back and skips the group.
+   *    recorded in the journal (~/.config/skills-manager/removals/<jobId>.json), moved into a
+   *    trash dir in its own skills dir, checked after the move (device, inode, every byte).
+   *    Any mismatch moves it back and skips the group.
    * 4. Re-check with the copies staged. A failure restores them and skips the group.
    * 5. Run `skills remove`, verify. Staged copies of a verified name are deleted for good;
-   *    those of a name that did not verify (or of a failed call) are moved back.
+   *    those of a name that did not verify (or of a failed call) are moved back. A copy whose
+   *    delete throws part way is never moved back: it stays in the trash dir (purge_failed).
+   *
+   * The journal is deleted once every copy is deleted or moved back. A copy that stays in a
+   * trash dir keeps it, so GET /api/recovery lists it. `setAside`: those copies.
    */
   private async runRemoval(
     guard: RemovalGuard,
@@ -256,20 +281,23 @@ export class SkillActions {
     plans: PlannedRemoval[],
     cwd: string,
     log: JobLog,
-    expected: ReadonlyMap<string, CopyIdentity | null>
-  ): Promise<{ ok: boolean; removed: string[] }> {
+    expected: ReadonlyMap<string, CopyIdentity | null>,
+    jobId: string
+  ): Promise<{ ok: boolean; removed: string[]; setAside: SetAside[] }> {
+    const journal = new RemovalJournal(journalDir(guard.home), jobId)
     const removed: string[] = []
     const deleted: string[] = []
     const restored: string[] = []
-    const stranded: string[] = []
     let ok = true
-    const settled = new Set<StagedCopy>()
+    const state: CopyStates = new Map()
     const giveBack = async (staged: StagedCopy[]) => {
       for (const copy of [...staged].reverse()) {
-        if (settled.has(copy)) continue
-        settled.add(copy)
-        if (await restoreStaged(copy, log)) restored.push(copy.path)
-        else stranded.push(copy.trashed)
+        // Only copies still whole in their trash dir go back: never one being deleted.
+        if (state.get(copy) !== "staged") continue
+        if (await restoreStaged(copy, log, journal)) {
+          state.set(copy, "restored")
+          restored.push(copy.path)
+        } else state.set(copy, "stranded")
       }
     }
     for (const group of groupPlans(plans)) {
@@ -293,12 +321,13 @@ export class SkillActions {
       try {
         let stageFailed: string | null = null
         for (const { path } of ticked) {
-          const copy = await stageCopy(path, scope, guard.home, expected.get(path) ?? null, log, this.hooks.stage)
+          const copy = await stageCopy(path, scope, guard.home, expected.get(path) ?? null, log, this.hooks.stage, journal)
           if (!copy) {
             stageFailed = path
             break
           }
           staged.push(copy)
+          state.set(copy, "staged")
         }
         if (stageFailed) {
           ok = false
@@ -306,7 +335,8 @@ export class SkillActions {
           await giveBack(staged)
           continue
         }
-        const done = await this.removeGroup(guard, scope, group, staged, cwd, log, { removed, deleted, settled, stranded, giveBack })
+        if (staged.length) await this.hooks.stage?.afterGroupStaged?.(staged.map((c) => c.path))
+        const done = await this.removeGroup(guard, scope, group, staged, cwd, log, { removed, deleted, state, giveBack, journal })
         if (!done) ok = false
       } catch (err) {
         // Whatever failed, no staged copy stays in a trash dir unless it cannot be moved back.
@@ -315,14 +345,31 @@ export class SkillActions {
         await giveBack(staged)
       }
     }
+    // A delete that threw before it could record its outcome: part of the copy may be gone.
+    for (const [copy, s] of state)
+      if (s === "purging") {
+        state.set(copy, "purge_failed")
+        await journal.set(copy.trashed, "purge_failed", "the delete stopped part way").catch(() => {})
+      }
     if (deleted.length) log(`Deleted separate copies: ${deleted.join(", ")}`)
     if (restored.length) log(`Restored separate copies: ${restored.join(", ")}`)
-    if (stranded.length) {
+    const setAside: SetAside[] = []
+    for (const [copy, s] of state)
+      if (s === "stranded" || s === "purge_failed")
+        setAside.push({ original: copy.path, staged: copy.trashed, status: s === "purge_failed" ? "purge_failed" : "staged" })
+    if (setAside.length) {
       ok = false
-      log(`Left in a trash dir (move them back by hand): ${stranded.join(", ")}`)
+      for (const item of setAside)
+        log(
+          item.status === "purge_failed"
+            ? `Partially deleted, still in trash: ${item.staged} (was ${item.original}). Delete it by hand.`
+            : `Set aside in a trash dir: ${item.staged} (was ${item.original}). Restore or delete it from the banner.`
+        )
     }
+    if (!(await journal.settle().catch(() => false)) && !setAside.length)
+      log(`The removal journal ${journal.file} was kept: it still lists copies that are not settled.`)
     if (removed.length) log(`Removed and verified: ${removed.join(", ")}`)
-    return { ok, removed }
+    return { ok, removed, setAside }
   }
 
   /**
@@ -340,10 +387,9 @@ export class SkillActions {
     out: {
       removed: string[]
       deleted: string[]
-      /** staged copies already deleted or moved back */
-      settled: Set<StagedCopy>
-      stranded: string[]
+      state: CopyStates
       giveBack: (copies: StagedCopy[]) => Promise<void>
+      journal: RemovalJournal
     }
   ): Promise<boolean> {
     const names = group.plans.map((p) => p.name)
@@ -371,12 +417,12 @@ export class SkillActions {
         continue
       }
       for (const copy of mine) {
-        out.settled.add(copy)
-        if (await purgeStaged(copy, guard.home, log)) out.deleted.push(copy.path)
-        else {
-          ok = false
-          out.stranded.push(copy.trashed)
-        }
+        // Settled only once the delete succeeded; while it runs, it is never moved back.
+        out.state.set(copy, "purging")
+        const outcome = await purgeStaged(copy, guard.home, log, out.journal)
+        out.state.set(copy, outcome === "deleted" ? "deleted" : outcome === "purge_failed" ? "purge_failed" : "stranded")
+        if (outcome === "deleted") out.deleted.push(copy.path)
+        else ok = false
       }
     }
     if (back.length) {
@@ -432,7 +478,7 @@ export class SkillActions {
         title: `Remove ${skill.cliName} (${scopeLabel(skill.scope)})`,
         command: this.cli.display(args),
         cwd,
-        run: async (log) => {
+        run: async (log, job) => {
           // The disk may have changed since the request: plan again, never wider.
           const [now] = await guard.plans(skill.scope, [skill.cliName], {
             intent: "remove",
@@ -444,7 +490,7 @@ export class SkillActions {
             return 1
           }
           logCopies(now, log)
-          const result = await this.runRemoval(guard, skill.scope, [now], cwd, log, identitiesOf([plan]))
+          const result = await this.runRemoval(guard, skill.scope, [now], cwd, log, identitiesOf([plan]), job.id)
           removed = result.removed
           return result.ok ? 0 : 1
         },
@@ -596,8 +642,6 @@ export interface RemoveHooks {
   afterTrash?: () => Promise<void> | void
 }
 
-const TRASH_PREFIX = ".skills-manager-trash-"
-
 /**
  * Removes a hand-made skill. Only placements in a deletable skills dir are
  * touched (see SkillLocation.deletable). Nothing is cached: each placement is
@@ -659,137 +703,6 @@ export async function removeManualSkill(
   return ok ? 0 : 1
 }
 
-/** Test seams around the staging of one ticked copy (path = the copy's path). */
-export interface StageHooks {
-  /** before the checks that precede the move */
-  beforeCheck?: (path: string) => Promise<void> | void
-  /** after those checks, right before the move into the trash dir */
-  afterCheck?: (path: string) => Promise<void> | void
-  /** after the move, before the trashed folder is checked */
-  afterMove?: (path: string) => Promise<void> | void
-}
-
-/** A ticked copy moved into a trash dir in its own skills dir, not yet deleted. */
-export interface StagedCopy {
-  path: string
-  placement: SkillPlacement
-  /** the folder in the trash dir */
-  trashed: string
-  dev: number
-  ino: number
-}
-
-/**
- * Stages a separate copy of an npx skill that the user ticked: a real folder directly in a
- * verified agent skills dir (no symlink from the scope root down to it), still the folder the
- * plan checked. Right before the move: same device and inode, same metadata walk (names,
- * kinds, modes, sizes, link texts, mtimes). It is moved into a fresh trash dir inside the same
- * skills dir, then checked again: same device and inode, still in the trash dir inside the
- * real skills dir, and the same full inventory (bytes included) as the plan recorded; for a
- * copy too large to read, the same metadata walk. On any mismatch it is moved back. Null when
- * it was not staged (logged).
- */
-export async function stageCopy(
-  path: string,
-  scope: string,
-  home: string,
-  identity: CopyIdentity | null,
-  log: JobLog,
-  hooks: StageHooks = {}
-): Promise<StagedCopy | null> {
-  await hooks.beforeCheck?.(path)
-  const refuse = (why: string) => {
-    log(`Refused to stage the separate copy ${path}: ${why}.`)
-    return null
-  }
-  if (!identity) return refuse("it could not be fingerprinted when it was checked, so it is not deleted here")
-  const placement: SkillPlacement = { path, root: dirname(path), scope, deletable: true }
-  const realRoot = await verifiedSkillsDir(placement, home)
-  if (!realRoot) return refuse("its skills dir links outside the scope")
-  if (isUnsafeToDelete(path, home)) return refuse("the path is not safe to delete")
-  const info = await lstat(path).catch(() => null)
-  if (!info?.isDirectory() || info.dev !== identity.dev || info.ino !== identity.ino)
-    return refuse("it is not the folder that was checked (it was moved or replaced)")
-  if ((await realpathOrNull(path)) !== join(realRoot, basename(path))) return refuse("it moved or its skills dir changed")
-  const quick = await takeInventory(path, { maxEntries: QUICK_MAX_ENTRIES, maxReadBytes: 0 }, { content: false }).catch(() => null)
-  if (!quick || quickDigest(quick) !== identity.quick) return refuse("its files changed since it was checked")
-  await hooks.afterCheck?.(path)
-
-  const trash = join(placement.root, TRASH_PREFIX + crypto.randomUUID().slice(0, 8))
-  const trashed = join(trash, basename(path))
-  try {
-    await mkdir(trash, { mode: 0o700 })
-    await rename(path, trashed)
-  } catch (err) {
-    await rmdir(trash).catch(() => {})
-    return refuse(`could not move it into a trash dir (${(err as Error).message})`)
-  }
-  const staged: StagedCopy = { path, placement, trashed, dev: info.dev, ino: info.ino }
-  await hooks.afterMove?.(path)
-
-  const problem = await checkStaged(staged, home, identity)
-  if (problem) {
-    log(`Refused to stage the separate copy ${path}: ${problem}.`)
-    await restoreStaged(staged, log)
-    return null
-  }
-  log(`Staged the separate copy ${path} in ${trash}`)
-  return staged
-}
-
-/** Why the staged folder is not the checked copy any more, else null. */
-async function checkStaged(staged: StagedCopy, home: string, identity: CopyIdentity): Promise<string | null> {
-  const real = await checkTrashed(staged.placement, staged.trashed, staged, home)
-  if (!real) return "what was moved is not the folder that was checked"
-  const limits = { maxEntries: PREVIEW_LIMITS.maxFilesPerSide, maxReadBytes: PREVIEW_LIMITS.maxReadBytes }
-  const inv = identity.full
-    ? await takeInventory(real, limits).catch(() => null)
-    : await takeInventory(real, { maxEntries: QUICK_MAX_ENTRIES, maxReadBytes: 0 }, { content: false }).catch(() => null)
-  if (!inv || inv.dev !== identity.dev || inv.ino !== identity.ino) return "what was moved is not the folder that was checked"
-  const same = identity.full ? fullDigest(inv) === identity.full : quickDigest(inv) === identity.quick
-  return same ? null : "its contents are not the ones that were checked"
-}
-
-/**
- * Moves a staged copy back to its path: never over something that appeared there meanwhile,
- * and checked after (same device and inode). False when it stays in the trash dir (logged).
- */
-export async function restoreStaged(staged: StagedCopy, log: JobLog): Promise<boolean> {
-  if (await lstat(staged.path).catch(() => null)) {
-    log(`Could not restore the separate copy ${staged.path}: something else is there now. It is at ${staged.trashed}.`)
-    return false
-  }
-  const moved = await rename(staged.trashed, staged.path).then(
-    () => true,
-    (err: Error) => {
-      log(`Could not restore the separate copy ${staged.path} (${err.message}). It is at ${staged.trashed}.`)
-      return false
-    }
-  )
-  if (!moved) return false
-  await rmdir(dirname(staged.trashed)).catch(() => {})
-  const info = await lstat(staged.path).catch(() => null)
-  if (!info || info.dev !== staged.dev || info.ino !== staged.ino) {
-    log(`Restored ${staged.path}, but it is not the folder that was staged; check it by hand.`)
-    return false
-  }
-  log(`Restored the separate copy ${staged.path}`)
-  return true
-}
-
-/** Deletes a staged copy for good, after checking it is still the staged folder. */
-export async function purgeStaged(staged: StagedCopy, home: string, log: JobLog): Promise<boolean> {
-  const real = await checkTrashed(staged.placement, staged.trashed, staged, home)
-  if (!real) {
-    log(`Did not delete the separate copy ${staged.path}: its trash dir changed. It is at ${staged.trashed}.`)
-    return false
-  }
-  await rm(real, { recursive: true })
-  await rmdir(dirname(real)).catch(() => {})
-  log(`Deleted the separate copy ${staged.path}`)
-  return true
-}
-
 /** Verify, move into a trash dir, verify again, then delete. */
 async function deleteSkillFolder(
   placement: SkillPlacement,
@@ -845,63 +758,10 @@ async function deleteSkillFolder(
   return true
 }
 
-/**
- * Real path of the trashed folder if it is still the folder that was
- * verified (same device and inode, not a symlink) and sits in a trash dir
- * directly inside the verified real skills dir. Else null.
- */
-async function checkTrashed(
-  placement: SkillPlacement,
-  trashed: string,
-  before: Pick<Stats, "dev" | "ino">,
-  home: string
-): Promise<string | null> {
-  const realRoot = await verifiedSkillsDir(placement, home)
-  if (!realRoot) return null
-  const trash = dirname(trashed)
-  const [trashInfo, info] = await Promise.all([
-    lstat(trash).catch(() => null),
-    lstat(trashed).catch(() => null),
-  ])
-  if (!trashInfo?.isDirectory() || trashInfo.isSymbolicLink()) return null
-  if (!info?.isDirectory() || info.isSymbolicLink()) return null
-  if (info.dev !== before.dev || info.ino !== before.ino) return null
-  const real = await realpathOrNull(trashed)
-  const expected = join(realRoot, basename(trash), basename(trashed))
-  if (real !== expected || !isInside(realRoot, real)) return null
-  return real
-}
-
-/**
- * Real path of the placement's skills dir if it resolves to the path
- * discovery expects: the placement is a direct child of the dir, and no
- * component from the scope root (home or the project) down to the dir is a
- * symlink or a non-directory. The scope root itself may sit behind a link;
- * it is resolved and trusted. Else null.
- */
-export async function verifiedSkillsDir(
-  placement: Pick<SkillPlacement, "path" | "root" | "scope">,
-  home: string
-): Promise<string | null> {
-  const root = resolve(placement.root)
-  if (dirname(resolve(placement.path)) !== root) return null
-  const scopeRoot = resolve(placement.scope === "user" ? home : placement.scope)
-  const base = isInside(scopeRoot, root) ? scopeRoot : dirname(root)
-  const realBase = await realpathOrNull(base)
-  if (!realBase) return null
-  let current = base
-  for (const part of relative(base, root).split("/").filter(Boolean)) {
-    current = join(current, part)
-    const info = await lstat(current).catch(() => null)
-    if (!info || info.isSymbolicLink() || !info.isDirectory()) return null
-  }
-  const realRoot = await realpathOrNull(root)
-  return realRoot === join(realBase, relative(base, root)) ? realRoot : null
-}
-
-function isUnsafeToDelete(path: string, home: string): boolean {
-  const p = resolve(path)
-  return p === home || isInside(p, home) || p.split("/").length < 4
+/** Names for a job title: up to three by name, otherwise a count. The job log keeps the full list. */
+export function skillList(names: string[]): string {
+  if (names.length <= 3) return names.join(", ")
+  return `${names.length} skills`
 }
 
 function scopeLabel(scope: string): string {

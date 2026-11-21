@@ -3,7 +3,8 @@ import { constants, type Stats } from "node:fs"
 import { lstat, open, readdir, readlink, realpath } from "node:fs/promises"
 import { join } from "node:path"
 import { isInside } from "../lib/files.ts"
-import { formatMb, previewTooLarge } from "../preview/limits.ts"
+import { HttpError } from "../lib/errors.ts"
+import { formatMb } from "../preview/limits.ts"
 
 /**
  * A deletion inventory: every entry under a folder, walked without following symlinks. It is
@@ -26,8 +27,6 @@ export interface InventoryEntry {
   sha256?: string
   /** Git blob id: sha1 of "blob <size>\0" and the bytes */
   blob?: string
-  /** CRLF line endings in a file without NUL bytes: computeSkillFolderHash folds them to LF */
-  crlf?: boolean
   /** symlinks: the link text */
   target?: string
   resolves?: "inside" | "outside" | "dangling"
@@ -48,9 +47,18 @@ export interface Inventory {
 export interface InventoryLimits {
   /** entries below the root */
   maxEntries: number
-  /** bytes read to hash files (content walks only) */
+  /** bytes read to hash files (content walks only), counted as they are read */
   maxReadBytes: number
 }
+
+/**
+ * Hard cap of a deletion inventory, independent of the preview limits: every byte of a copy
+ * is hashed before it may be deleted. A copy over it cannot be deleted here (tooLargeToRemove).
+ */
+export const DELETE_LIMITS: InventoryLimits = { maxEntries: 20_000, maxReadBytes: 500 * 1024 * 1024 }
+
+/** The same cap for a metadata walk: names, kinds, modes, sizes and mtimes; no file is read. */
+export const QUICK_LIMITS: InventoryLimits = { maxEntries: DELETE_LIMITS.maxEntries, maxReadBytes: 0 }
 
 /** Fingerprint of a copy that the plan checked; the job compares it before and after staging. */
 export interface CopyIdentity {
@@ -58,12 +66,23 @@ export interface CopyIdentity {
   ino: number
   /** digest of the metadata walk: names, kinds, modes, sizes, link texts and mtimes */
   quick: string
-  /** digest of the content walk (no mtimes), or null when the copy was too large to read */
-  full: string | null
+  /** digest of the content walk: every byte of every file (no mtimes) */
+  full: string
 }
 
-/** Cap of a metadata-only walk (identity of a copy too large to read in full). */
-export const QUICK_MAX_ENTRIES = 100_000
+/** 413 too_large: a walk passed its limits. */
+export function inventoryTooLarge(detail: string): HttpError {
+  return new HttpError(413, "too_large", `Too large: ${detail}`)
+}
+
+export function isTooLarge(err: unknown): boolean {
+  return err instanceof HttpError && err.status === 413
+}
+
+/** Test seam: called after each chunk a content walk reads (`read`: bytes of that file so far). */
+export interface InventoryHooks {
+  afterChunk?: (path: string, read: number) => Promise<void> | void
+}
 
 /**
  * Names the skills CLI never copies (isExcluded in skills 1.9.0, used by copyDirectory and
@@ -75,11 +94,15 @@ const CLI_EXCLUDED_DIRS = new Set([".git", "__pycache__", "__pypackages__"])
 
 const HASH_CHUNK = 64 * 1024
 
-/** Walks `root` (a real directory, not a link). Throws 413 past a limit. */
+/**
+ * Walks `root` (a real directory, not a link). Throws 413 past a limit. File bytes are charged
+ * against maxReadBytes as they are read, and no file is read past the size lstat gave: a file
+ * that grows or shrinks while it is read fails the walk.
+ */
 export async function takeInventory(
   root: string,
   limits: InventoryLimits,
-  options: { content?: boolean } = {}
+  options: { content?: boolean; hooks?: InventoryHooks } = {}
 ): Promise<Inventory> {
   const content = options.content ?? true
   const top = await lstat(root)
@@ -87,13 +110,13 @@ export async function takeInventory(
   const realRoot = await realpath(root)
   const entries = new Map<string, InventoryEntry>([["", dirEntry(top)]])
   let count = 0
-  let bytes = 0
+  const budget = { used: 0, max: limits.maxReadBytes }
   const stack: [string, string][] = [[root, ""]]
   while (stack.length) {
     const [dir, prefix] = stack.pop() as [string, string]
     for (const name of (await readdir(dir)).sort()) {
       if (++count > limits.maxEntries)
-        throw previewTooLarge(`the folder has more than ${limits.maxEntries.toLocaleString("en-US")} entries`)
+        throw inventoryTooLarge(`the folder has more than ${limits.maxEntries.toLocaleString("en-US")} entries`)
       const full = join(dir, name)
       const rel = prefix ? `${prefix}/${name}` : name
       const info = await lstat(full)
@@ -108,10 +131,9 @@ export async function takeInventory(
       } else if (info.isFile()) {
         const entry: InventoryEntry = { kind: "file", mode: info.mode & 0o7777, size: info.size, mtimeMs: info.mtimeMs }
         if (content) {
-          bytes += info.size
-          if (bytes > limits.maxReadBytes)
-            throw previewTooLarge(`the folder holds more than ${formatMb(limits.maxReadBytes)}`)
-          Object.assign(entry, await hashFile(full, info))
+          // Refuse early when the size alone passes the budget; hashFile charges what it reads.
+          if (budget.used + info.size > budget.max) throw overBudget(budget.max)
+          Object.assign(entry, await hashFile(full, info, budget, options.hooks))
         }
         entries.set(rel, entry)
       } else entries.set(rel, { kind: specialKind(info), mtimeMs: info.mtimeMs })
@@ -134,8 +156,15 @@ function specialKind(info: Stats): EntryKind {
   return "unknown"
 }
 
-/** SHA-256, Git blob id and CRLF flag of a regular file, read once without following links. */
-async function hashFile(path: string, info: Stats) {
+function overBudget(max: number): HttpError {
+  return inventoryTooLarge(`the folder holds more than ${formatMb(max)}`)
+}
+
+/**
+ * SHA-256 and Git blob id of a regular file, read once without following links. Reads at most
+ * the lstat size plus one byte (to see whether it grew), charging every byte read to `budget`.
+ */
+async function hashFile(path: string, info: Stats, budget: { used: number; max: number }, hooks: InventoryHooks = {}) {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const now = await handle.stat()
@@ -145,22 +174,22 @@ async function hashFile(path: string, info: Stats) {
     const blob = createHash("sha1").update(`blob ${info.size}\0`)
     const chunk = Buffer.alloc(HASH_CHUNK)
     let read = 0
-    let nul = false
-    let crlf = false
-    let lastCr = false
-    for (;;) {
-      const { bytesRead } = await handle.read(chunk, 0, chunk.length, read)
+    // One byte past the size: if it is there, the file grew.
+    while (read <= info.size) {
+      const want = Math.min(chunk.length, info.size + 1 - read)
+      const { bytesRead } = await handle.read(chunk, 0, want, read)
       if (bytesRead === 0) break
+      budget.used += bytesRead
+      if (budget.used > budget.max) throw overBudget(budget.max)
+      read += bytesRead
+      if (read > info.size) break
       const part = chunk.subarray(0, bytesRead)
       sha256.update(part)
       blob.update(part)
-      if (!nul && part.includes(0)) nul = true
-      if (!crlf && ((lastCr && part[0] === 0x0a) || part.includes("\r\n"))) crlf = true
-      lastCr = part[part.length - 1] === 0x0d
-      read += bytesRead
+      await hooks.afterChunk?.(path, read)
     }
     if (read !== info.size) throw new Error(`${path} changed while it was read`)
-    return { sha256: sha256.digest("hex"), blob: blob.digest("hex"), crlf: crlf && !nul }
+    return { sha256: sha256.digest("hex"), blob: blob.digest("hex") }
   } finally {
     await handle.close()
   }
@@ -183,9 +212,9 @@ function digest(inv: Inventory, fields: (e: InventoryEntry, rel: string) => unkn
   return hash.digest("hex")
 }
 
-/** The identity of a copy, from a content walk, or (too large) a metadata walk. */
+/** The identity of a copy, from a content walk. */
 export function identityOf(inv: Inventory): CopyIdentity {
-  return { dev: inv.dev, ino: inv.ino, quick: quickDigest(inv), full: inv.content ? fullDigest(inv) : null }
+  return { dev: inv.dev, ino: inv.ino, quick: quickDigest(inv), full: fullDigest(inv) }
 }
 
 export function sameIdentity(a: CopyIdentity | null | undefined, b: CopyIdentity | null | undefined): boolean {
@@ -296,23 +325,6 @@ function countable(reason: string, n: number): string {
 function withExamples(reason: string, rels: string[]): string {
   const shown = rels.slice(0, 2).join(", ")
   return `${reason} (${shown}${rels.length > 2 ? `, +${rels.length - 2} more` : ""})`
-}
-
-/**
- * Why the CLI folder hash (computeSkillFolderHash) cannot pin every byte of this inventory, or
- * null when it can: the hash skips links that leave the folder, special files, empty folders
- * and the names the CLI excludes, ignores permission bits, and folds CRLF to LF.
- */
-export function folderHashBlindSpots(inv: Inventory): string[] {
-  const out = ownDataReasons(inv)
-  const links = [...inv.entries].filter(([, e]) => e.kind === "symlink" && e.resolves === "inside").map(([rel]) => rel)
-  if (links.length) out.push(withExamples("has links, which a CLI copy never has", links))
-  const parents = new Set([...inv.entries.keys()].map((rel) => rel.split("/").slice(0, -1).join("/")))
-  const empty = [...inv.entries].filter(([rel, e]) => rel && e.kind === "dir" && !parents.has(rel)).map(([rel]) => rel)
-  if (empty.length) out.push(withExamples("has empty folders, which the hash does not cover", empty))
-  const crlf = [...inv.entries].filter(([, e]) => e.crlf).map(([rel]) => rel)
-  if (crlf.length) out.push(withExamples("has CRLF line endings, which the hash folds to LF", crlf))
-  return out
 }
 
 /**

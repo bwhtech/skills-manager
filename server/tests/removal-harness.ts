@@ -14,7 +14,9 @@ import { handleError } from "../lib/errors.ts"
 import { JobManager } from "../jobs.ts"
 import type { UpstreamState } from "../preview/service.ts"
 import { RemovalGuard } from "../removal/guard.ts"
+import { RemovalRecovery } from "../removal/recovery.ts"
 import type { AgentTable, CliNameFns } from "../removal/plan.ts"
+import { recoveryRoutes } from "../routes/recovery.ts"
 import { updateRoutes } from "../routes/updates.ts"
 import type { Services } from "../services.ts"
 import { UpdateChecker } from "../updates.ts"
@@ -180,6 +182,8 @@ export interface Wired {
   jobs: JobManager
   actions: SkillActions
   guard: RemovalGuard
+  /** GET /api/recovery and its actions, over the fixture (journals in <home>/.config) */
+  recovery: RemovalRecovery
   /** the hooks the actions were built with; tests may set `stage` */
   hooks: ActionHooks
   calls: string[][]
@@ -187,6 +191,8 @@ export interface Wired {
   upstream: { state: UpstreamState | Error; asked: string[]; onAsk?: () => Promise<void> | void }
   run(body: unknown): Promise<Response>
   status(): Promise<import("../../shared/api.ts").UpdateStatus>
+  /** a request to the /recovery routes: GET without a body, POST with one */
+  recover(path: "" | "/restore" | "/delete", body?: unknown): Promise<Response>
 }
 
 /** Checker, guard, actions and the /updates routes wired like services.ts, over a fixture. */
@@ -221,6 +227,11 @@ export async function wire(
     afterRemove: (scope, removed) => updates.markRemoved(scope, removed),
   }
   const actions = new SkillActions(cli, jobs, hooks, guard, fx.readLock)
+  const recovery = new RemovalRecovery({
+    home: fx.home,
+    running: () => jobs.unfinished().map((job) => job.id),
+    skillsDirs: () => guard.skillsDirs([]),
+  })
   updates.start()
   while (updates.get().checking) await Bun.sleep(1)
   const app = new Hono()
@@ -229,11 +240,13 @@ export async function wire(
     "/",
     updateRoutes({ updates, projects, actions, removals: guard, readLock: fx.readLock } as unknown as Services)
   )
+  app.route("/", recoveryRoutes({ recovery } as unknown as Services))
   return {
     updates,
     jobs,
     actions,
     guard,
+    recovery,
     hooks,
     calls,
     upstream,
@@ -244,6 +257,11 @@ export async function wire(
         body: JSON.stringify(body),
       }),
     status: async () => (await (await app.request("/updates")).json()) as import("../../shared/api.ts").UpdateStatus,
+    recover: async (path, body) =>
+      app.request(`/recovery${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        ...(body === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+      }),
   }
 }
 

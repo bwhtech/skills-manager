@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, mkdir, symlink, writeFile } from "node:fs/promises"
+import { appendFile, chmod, mkdir, symlink, truncate, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { RemovalCopy } from "../../shared/api.ts"
-import { gitTreeHash, takeInventory } from "../removal/inventory.ts"
+import { DELETE_LIMITS, gitTreeHash, takeInventory } from "../removal/inventory.ts"
 import { planRemovals } from "../removal/plan.ts"
 import { makeFixture, wire, type Fixture } from "./removal-harness.ts"
 
@@ -11,7 +11,8 @@ const LIMITS = { maxEntries: 2000, maxReadBytes: 50 * 1024 * 1024 }
 /**
  * foo: a canonical folder and a Claude Code copy with the same visible files (SKILL.md and
  * ref.md). `change` alters the copy afterwards. The lock entry has no installMode and the
- * CLI folder hash of the clean copy, so without the change the copy is provably the install.
+ * CLI folder hash of the clean copy, so without the change the copy has the same content as
+ * the installed version.
  */
 async function sameVisibleBytes(change: (copy: string, fx: Fixture) => Promise<void>) {
   const fx = await makeFixture()
@@ -107,8 +108,8 @@ describe("deletion inventory: identical means every entry matches (review round 
   })
 })
 
-describe("explicit Remove promotes a copy only with provenance (review round 8, item 1)", () => {
-  test("no canonical folder: installMode \"copy\" and the lock hash are both needed; extra entries stop it", async () => {
+describe("explicit Remove promotes a copy only next to an identical canonical folder (review round 9, item 4)", () => {
+  test("no canonical folder: never promoted, whatever installMode and the lock hash say", async () => {
     const fx = await makeFixture()
     const copy = await fx.skill(".claude/skills", "foo")
     const cli = await fx.loadCli()
@@ -121,17 +122,27 @@ describe("explicit Remove promotes a copy only with provenance (review round 8, 
       )
       return p
     }
-    expect((await plan({ skillFolderHash: hash })).willDelete).toEqual([]) // no installMode
-    expect((await plan({ installMode: "copy", skillFolderHash: "f".repeat(64) })).willDelete).toEqual([])
-    const ok = await plan({ installMode: "copy", skillFolderHash: hash })
-    expect(ok.willDelete).toEqual([copy])
-    expect(ok.promoted?.[0].reason).toBe('copy the skills CLI installed (installMode "copy"): its CLI folder hash matches the lock')
-    // The CLI hash skips these, so it cannot vouch for them.
-    await writeFile(join(copy, "metadata.json"), "{}")
-    expect(await cli.computeSkillFolderHash!(copy)).toBe(hash)
-    const meta = await plan({ installMode: "copy", skillFolderHash: hash })
-    expect(meta.willDelete).toEqual([])
-    expect(meta.copies[0].reasons).toEqual(["no canonical folder to compare with", "has metadata.json (metadata.json)"])
+    const entries: Record<string, string>[] = [{ skillFolderHash: hash }, { installMode: "copy", skillFolderHash: hash }, { installMode: "copy", computedHash: hash }]
+    for (const entry of entries) {
+      const p = await plan(entry)
+      expect(p.willDelete).toEqual([])
+      expect(p.promoted).toBeUndefined()
+      expect(p.copies.map((c) => [c.path, c.identical, c.reasons])).toEqual([[copy, false, ["no canonical folder to compare with"]]])
+    }
+  })
+
+  test("a canonical folder that differs from the copy: no promotion, even with a matching lock hash", async () => {
+    const fx = await makeFixture()
+    const canonical = await fx.skill(".agents/skills", "foo")
+    await writeFile(join(canonical, "extra.md"), "only in the canonical folder\n")
+    const copy = await fx.skill(".claude/skills", "foo")
+    const cli = await fx.loadCli()
+    await fx.writeLock({ foo: { skillFolderHash: await cli.computeSkillFolderHash!(copy) } })
+    const w = await wire(fx, {})
+    const [plan] = await w.guard.plans("user", ["foo"], { intent: "remove" })
+    expect(plan.promoted).toBeUndefined()
+    expect(plan.willDelete).not.toContain(copy)
+    expect(plan.copies.map((c) => [c.path, c.identical])).toEqual([[copy, false]])
   })
 
   test("a GitHub install: the lock's 40-hex skillFolderHash is checked as a Git tree id", async () => {
@@ -148,7 +159,9 @@ describe("explicit Remove promotes a copy only with provenance (review round 8, 
     const w = await wire(fx, {})
     const [plan] = await w.guard.plans("user", ["foo"], { intent: "remove" })
     expect(plan.willDelete).toEqual([copy, canonical].sort())
-    expect(plan.promoted?.[0].reason).toContain("its Git tree id matches the lock's skillFolderHash")
+    expect(plan.promoted?.[0].reason).toBe(
+      "same content as installed version: same files, links and permissions as the canonical folder, and the lock's skillFolderHash (Git tree id) matches"
+    )
     await fx.writeLock({ foo: { skillFolderHash: "0".repeat(40) } })
     const [other] = await w.guard.plans("user", ["foo"], { intent: "remove" })
     expect(other.blockedUnlessCopies).toBe(true)
@@ -180,5 +193,54 @@ describe("explicit Remove promotes a copy only with provenance (review round 8, 
     git("add", "-A")
     const root = git("write-tree")
     expect(gitTreeHash(await takeInventory(skill, LIMITS))).toBe(git("rev-parse", `${root}:skills/foo`))
+  })
+})
+
+describe("content walks charge what they read and stop at the lstat size (review round 9, item 6)", () => {
+  const CHUNK = 64 * 1024
+  async function bigFile(size: number) {
+    const fx = await makeFixture()
+    const dir = join(fx.home, "walk")
+    await mkdir(dir)
+    const file = join(dir, "big.bin")
+    await writeFile(file, new Uint8Array(size).fill(7))
+    return { dir, file }
+  }
+
+  test("a file that grows while it is hashed fails the walk, after at most its size plus one byte", async () => {
+    const size = 3 * CHUNK + 100
+    const { dir, file } = await bigFile(size)
+    const reads: number[] = []
+    const walk = takeInventory(dir, { maxEntries: 10, maxReadBytes: size + 1 }, {
+      hooks: {
+        afterChunk: async (_path, read) => {
+          reads.push(read)
+          if (reads.length === 1) await appendFile(file, new Uint8Array(10 * CHUNK)) // grows by 640 KB
+        },
+      },
+    })
+    // Not a 413: the budget is size + 1, so nothing past the one extra byte was read.
+    await expect(walk).rejects.toThrow(`${file} changed while it was read`)
+    expect(reads).toEqual([CHUNK, 2 * CHUNK, 3 * CHUNK]) // the last 100 bytes + 1 showed the growth
+  })
+
+  test("a file that shrinks while it is hashed fails the walk", async () => {
+    const { dir, file } = await bigFile(2 * CHUNK)
+    const walk = takeInventory(dir, { maxEntries: 10, maxReadBytes: 4 * CHUNK }, {
+      hooks: { afterChunk: (_path, read) => (read === CHUNK ? truncate(file, CHUNK + 5) : undefined) },
+    })
+    await expect(walk).rejects.toThrow(`${file} changed while it was read`)
+  })
+
+  test("the budget is the sum of the files' bytes: exactly at it passes, one byte under is 413", async () => {
+    const { dir } = await bigFile(CHUNK + 1)
+    await writeFile(join(dir, "small.md"), "12345")
+    const total = CHUNK + 1 + 5
+    expect((await takeInventory(dir, { maxEntries: 10, maxReadBytes: total })).entries.size).toBe(3)
+    await expect(takeInventory(dir, { maxEntries: 10, maxReadBytes: total - 1 })).rejects.toMatchObject({ status: 413 })
+  })
+
+  test("the deletion cap does not depend on the preview limits", () => {
+    expect(DELETE_LIMITS).toEqual({ maxEntries: 20_000, maxReadBytes: 500 * 1024 * 1024 })
   })
 })
