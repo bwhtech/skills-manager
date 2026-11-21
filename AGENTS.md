@@ -4,6 +4,22 @@ A small web app for managing agent skills and agent instruction files on this se
 It reads skill folders, edits `SKILL.md` files and runs the `skills` CLI (vercel-labs/skills)
 to install, update and remove skills.
 
+## At a glance
+
+- Live app: https://hussain-coding.tail5c9b7d.ts.net:8466. Tailnet only, through Tailscale
+  Serve (not Funnel). There is no login; the tailnet controls access.
+- Server: Bun + Hono on `127.0.0.1:3530`. It serves the built UI and `/api` on that one port.
+- Service: systemd user unit `skills-manager`. Status: `systemctl --user status skills-manager`.
+  Logs: `journalctl --user -u skills-manager -f`.
+- Code: this folder, `/mnt/data/skills-manager` (also `~/skills-manager`). Repo:
+  `NagariaHussain/skills-manager` (private).
+- Production runs from a separate worktree, `/mnt/data/skills-manager-live`. To ship, commit,
+  then run `scripts/deploy.sh` (see Production).
+- Dev: `bun run dev` serves the UI on `127.0.0.1:5530`. It sends `/api` to port 3530, which is
+  the live server unless you stop it and run `bun run dev:server`.
+- Checks: `bun run typecheck && bun run lint && bun test server`.
+- App state: `~/.config/skills-manager/` (`state.json`, removal journals in `removals/`).
+
 ## Stack
 
 - Backend: Hono on Bun, in `server/`. Entry: `server/index.ts`.
