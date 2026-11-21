@@ -205,6 +205,23 @@ export interface InstructionFile {
   exists: boolean
   /** set when path is a symlink: absolute resolved target */
   linkTarget?: string
+  /** set when linkTarget is itself a known instruction file, in any scope: its id */
+  linkTargetId?: string
+  /** that known instruction file (linkTargetFile.id === linkTargetId) */
+  linkTargetFile?: InstructionLinkRef
+  /** known instruction files (any scope) that are symlinks to this file */
+  linkedFrom?: InstructionLinkRef[]
+  /** path is a symlink whose target does not exist (exists is false) */
+  linkBroken?: boolean
+}
+
+/** Another instruction file, as a link source or target shows it. */
+export interface InstructionLinkRef {
+  id: string
+  scope: ScopeKey
+  path: string
+  fileName: InstructionFileName
+  agentLabel: string
 }
 
 // User level: ~/.claude/CLAUDE.md (Claude Code), ~/.codex/AGENTS.md (Codex).
@@ -218,6 +235,73 @@ export interface InstructionFile {
 
 export interface SaveInstructionRequest extends SaveRequest {
   create?: boolean
+}
+
+// Sync via symlink. A "link" makes the file at :id a symlink to another known
+// instruction file (the target), so both agents read one file.
+//
+// GET /api/instructions/:id/sync-preview  -> SyncPreview
+//   :id is the target. Lists the files that could become links to it: the
+//   target's scope, plus user scope when the target is in a project.
+//   400 if the target is missing or is itself a symlink.
+// POST /api/instructions/:id/link  LinkInstructionRequest -> LinkInstructionResponse
+//   Turns the file at :id (the source) into a symlink to targetId.
+//   Both must be known instruction files. 400 self_link, cycle, target_is_link
+//   (point at the real file instead), target_missing. 409 already_linked if the
+//   source is a symlink. 409 conflict if the source is a regular file whose hash
+//   is not baseHash. The source is copied to <path>.bak (or <path>.bak-<time>
+//   if that exists; a backup is never overwritten), then a temp symlink in the
+//   same dir is renamed over it. A missing source becomes a link, no backup.
+//   The link text is relative when both files are under HOME, else absolute.
+// POST /api/instructions/:id/unlink  UnlinkInstructionRequest -> UnlinkInstructionResponse
+//   Replaces the symlink at :id with a regular file: a copy of the target's
+//   content now ("copy"), or an empty file ("empty"). Never touches the target.
+//   400 not_a_link. 409 link_broken for "copy" when the target does not exist.
+
+export interface LinkInstructionRequest {
+  targetId: string
+  /** FileContent.hash of the source; required when the source is a regular file */
+  baseHash?: string
+  /** the server always backs up a regular source; the client confirms it saw that */
+  backup: true
+}
+
+export interface LinkInstructionResponse {
+  file: InstructionFile
+  /** absolute path of the backup, or null when the source did not exist */
+  backupPath: string | null
+}
+
+export interface UnlinkInstructionRequest {
+  mode: "copy" | "empty"
+}
+
+export interface UnlinkInstructionResponse {
+  file: InstructionFile
+}
+
+export interface SyncCandidate {
+  file: InstructionFile
+  /** why it cannot become a link to the target; omitted when it can */
+  blocked?: string
+  /** the source's content now (regular files only): the diff's old side */
+  content?: string
+  /** send as LinkInstructionRequest.baseHash */
+  hash?: string
+  /** same bytes as the target */
+  identical: boolean
+  /** lines from the source's content to the target's */
+  linesAdded: number
+  linesRemoved: number
+  /** where the link would back the source up; null for a missing source */
+  backupPath: string | null
+}
+
+export interface SyncPreview {
+  target: InstructionFile
+  targetContent: string
+  targetHash: string
+  candidates: SyncCandidate[]
 }
 
 // ---------- Updates ----------

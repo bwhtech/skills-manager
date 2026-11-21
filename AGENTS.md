@@ -48,7 +48,10 @@ to install, update and remove skills.
   when the file changed on disk.
 - npx skills show a fixed warning: "Update overwrites local edits." No backup, no diff.
 - Instruction files: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` at user and project level.
-  Create missing files. Symlinked files open their target and show a "linked" badge.
+  Create missing files. A symlinked file never opens in an editor: selecting it opens its target
+  (in the target's scope), and rows show "Synced → …" and "Also read as …".
+  "Sync another file to this…" turns other instruction files into symlinks to a regular file
+  (preview with diff, backup to `<path>.bak`); "Stop syncing…" turns a link back into a file.
 - Projects: cached scan of `~` (depth 4) plus pinned projects; Rescan button.
 - Updates: `skills check` on boot and on Refresh, using `gh auth token` as `GITHUB_TOKEN`.
   Per-skill Update and Update all. CLI output streams to a log drawer.

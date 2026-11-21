@@ -12,6 +12,8 @@ import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { CreateInstruction } from "./create-instruction"
 import { InstructionEditor, instructionDraftKey } from "./instruction-editor"
 import { InstructionList } from "./instruction-list"
+import { openInstruction } from "./link-labels"
+import { LinkedFile } from "./linked-file"
 
 interface InstructionsViewProps {
   scope: ScopeKey
@@ -31,6 +33,14 @@ export function InstructionsView({ scope, docId }: InstructionsViewProps) {
   useEffect(() => {
     if (!isDesktop && fallbackId && fallbackDirty) navigate({ doc: fallbackId }, { replace: true, force: true })
   }, [isDesktop, fallbackId, fallbackDirty])
+
+  // A link opened by its id (a reload, Back, a typed hash) shows the file it
+  // points at instead, in that file's scope: an editor never opens on a link.
+  const docFile = docId ? list.find((file) => file.id === docId) : undefined
+  const redirect = docFile?.linkTargetFile ? docFile : null
+  useEffect(() => {
+    if (redirect) openInstruction(redirect, { replace: true })
+  }, [redirect])
 
   const listPane = (
     <InstructionListPane
@@ -83,11 +93,19 @@ export function InstructionsView({ scope, docId }: InstructionsViewProps) {
   )
 }
 
+/** The file at docId, else the first real file: links come after the files they point at. */
 function pickDefault(list: InstructionFile[], docId: string | null) {
-  return list.find((file) => file.id === docId) ?? list.find((file) => file.exists) ?? list[0] ?? null
+  return (
+    list.find((file) => file.id === docId) ??
+    list.find((file) => file.exists && !file.linkTarget) ??
+    list.find((file) => file.exists) ??
+    list[0] ??
+    null
+  )
 }
 
 function InstructionBody({ file, onDirtyChange }: { file: InstructionFile; onDirtyChange?: (dirty: boolean) => void }) {
+  if (file.linkTarget) return <LinkedFile file={file} />
   return file.exists ? (
     <InstructionEditor file={file} onDirtyChange={onDirtyChange} />
   ) : (
@@ -133,7 +151,7 @@ function InstructionListPane({ files, list, selectedId }: InstructionListPanePro
       </Empty>
     )
   }
-  return <InstructionList files={list} selectedId={selectedId} onSelect={(id) => navigate({ doc: id })} />
+  return <InstructionList files={list} selectedId={selectedId} onSelect={(file) => openInstruction(file)} />
 }
 
 /** Phone screen for one instruction file. */
@@ -145,7 +163,7 @@ function InstructionScreen({ file, loading }: { file: InstructionFile | undefine
         title={file?.fileName ?? "Instruction file"}
         subtitle={file?.agentLabel}
         backLabel="instruction files"
-        dirty={file?.exists ? dirty : undefined}
+        dirty={file?.exists && !file.linkTarget ? dirty : undefined}
         onBack={() => goUp({ doc: null })}
       />
       <div className="min-h-0 flex-1">

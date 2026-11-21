@@ -3,9 +3,9 @@ import { useQueryClient } from "@tanstack/react-query"
 import type { InstructionFile } from "@shared/api"
 import { DocumentEditor, type SaveOptions } from "@/components/editor"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
-import { api, errorMessage, keys, useInstruction } from "@/lib/api"
+import { api, errorMessage, keys, useInstruction, useScopes } from "@/lib/api"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
-import { LinkedBadge } from "./linked-badge"
+import { alsoReadAs } from "./link-labels"
 
 /** The draft store key of an instruction file (lib/drafts.ts). */
 export function instructionDraftKey(fileId: string) {
@@ -20,6 +20,9 @@ interface InstructionEditorProps {
 export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProps) {
   const client = useQueryClient()
   const content = useInstruction(file.id, file.exists)
+  const home = useScopes().data?.home
+  // Other files are links to this one: say so, so edits here are not a surprise there.
+  const also = alsoReadAs(file, home)
 
   if (content.isPending) return <EditorSkeleton />
   if (content.isError) {
@@ -44,12 +47,8 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
         path={file.path}
         title={file.fileName}
         file={content.data}
-        meta={
-          <>
-            <span className="hidden truncate text-xs text-muted-foreground lg:inline">{file.agentLabel}</span>
-            {file.linkTarget && <LinkedBadge target={file.linkTarget} />}
-          </>
-        }
+        warning={also ? `${also}. Edits here apply to all of them.` : undefined}
+        meta={<span className="hidden truncate text-xs text-muted-foreground lg:inline">{file.agentLabel}</span>}
         onSave={save}
         onSaved={() => void client.invalidateQueries({ queryKey: keys.instruction(file.id) })}
         onReload={async () => (await content.refetch()).data}

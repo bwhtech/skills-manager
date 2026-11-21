@@ -13,6 +13,8 @@ import {
   type FileContent,
   type InstallRequest,
   type InstructionFile,
+  type LinkInstructionRequest,
+  type LinkInstructionResponse,
   type Job,
   type JobRef,
   type RemovalPlan,
@@ -26,6 +28,9 @@ import {
   type SearchResult,
   type SkillDetail,
   type SkillSummary,
+  type SyncPreview,
+  type UnlinkInstructionRequest,
+  type UnlinkInstructionResponse,
   type UpdatePreview,
   type UpdateRunRequest,
   type UpdateStatus,
@@ -127,6 +132,11 @@ export const api = {
   },
   saveInstruction: (id: string, body: SaveInstructionRequest) =>
     request<SaveResponse>("PUT", `/api/instructions/${id}`, body),
+  syncPreview: (id: string) => request<SyncPreview>("GET", `/api/instructions/${id}/sync-preview`),
+  linkInstruction: (id: string, body: LinkInstructionRequest) =>
+    request<LinkInstructionResponse>("POST", `/api/instructions/${id}/link`, body),
+  unlinkInstruction: (id: string, body: UnlinkInstructionRequest) =>
+    request<UnlinkInstructionResponse>("POST", `/api/instructions/${id}/unlink`, body),
 
   updates: () => request<UpdateStatus>("GET", "/api/updates"),
   checkUpdates: () => request<UpdateStatus>("POST", "/api/updates/check"),
@@ -150,6 +160,7 @@ export const keys = {
   skillFile: (id: string, path: string) => ["skill", id, "file", path] as const,
   instructions: (scope: ScopeKey) => ["instructions", scope] as const,
   instruction: (id: string) => ["instruction", id] as const,
+  syncPreview: (id: string) => ["instruction", id, "sync-preview"] as const,
   updates: ["updates"] as const,
   updatePreviews: ["update-preview"] as const,
   updatePreview: (id: string) => ["update-preview", id] as const,
@@ -200,6 +211,26 @@ export function useInstruction(id: string | null, exists: boolean) {
     queryFn: () => api.instruction(id!),
     enabled: !!id && exists,
   })
+}
+
+export function useSyncPreview(id: string, enabled: boolean) {
+  return useQuery({
+    queryKey: keys.syncPreview(id),
+    queryFn: () => api.syncPreview(id),
+    enabled,
+    // The dialog compares hashes: always start from the disk as it is now.
+    staleTime: 0,
+    refetchOnMount: "always",
+  })
+}
+
+/** After a link or unlink: every scope's list and every open file may have changed. */
+export async function invalidateInstructions(client: QueryClient) {
+  await Promise.all([
+    client.invalidateQueries({ queryKey: ["instructions"] }),
+    client.invalidateQueries({ queryKey: ["instruction"] }),
+    client.invalidateQueries({ queryKey: keys.scopes }),
+  ])
 }
 
 export function useUpdates() {

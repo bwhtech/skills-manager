@@ -1,5 +1,13 @@
 import { Hono } from "hono"
-import type { SaveInstructionRequest, SaveResponse } from "../../shared/api.ts"
+import type {
+  LinkInstructionRequest,
+  LinkInstructionResponse,
+  SaveInstructionRequest,
+  SaveResponse,
+  SyncPreview,
+  UnlinkInstructionRequest,
+  UnlinkInstructionResponse,
+} from "../../shared/api.ts"
 import { badRequest, readJson } from "../lib/errors.ts"
 import { requireScope } from "../lib/validate.ts"
 import type { Services } from "../services.ts"
@@ -12,6 +20,31 @@ export function instructionRoutes(svc: Services): Hono {
     if (!raw) throw badRequest("scope is required")
     const scope = requireScope(raw, (p) => svc.projects.has(p))
     return c.json(await svc.instructions.list(scope))
+  })
+
+  app.get("/instructions/:id/sync-preview", async (c) => {
+    const body: SyncPreview = await svc.instructions.syncPreview(
+      c.req.param("id")
+    )
+    return c.json(body)
+  })
+
+  app.post("/instructions/:id/link", async (c) => {
+    const body: LinkInstructionResponse = await svc.instructions.link(
+      c.req.param("id"),
+      await readJson<LinkInstructionRequest>(c)
+    )
+    svc.skills.invalidate()
+    return c.json(body)
+  })
+
+  app.post("/instructions/:id/unlink", async (c) => {
+    const body: UnlinkInstructionResponse = await svc.instructions.unlink(
+      c.req.param("id"),
+      await readJson<UnlinkInstructionRequest>(c)
+    )
+    svc.skills.invalidate()
+    return c.json(body)
   })
 
   app.get("/instructions/:id", async (c) =>
