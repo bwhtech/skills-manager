@@ -3,8 +3,7 @@ import { useQueryClient } from "@tanstack/react-query"
 import type { InstructionFile } from "@shared/api"
 import { DocumentEditor, type SaveOptions } from "@/components/editor"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
-import { HttpError, api, errorMessage, keys, useInstruction, useScopes } from "@/lib/api"
-import { tildify } from "@/lib/format"
+import { api, errorMessage, keys, useInstruction, useScopes } from "@/lib/api"
 import { docAddress } from "@/features/open/open-path"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { alsoReadAs } from "./link-labels"
@@ -38,13 +37,10 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
     )
   }
 
-  const save = async (text: string, { baseHash, force }: SaveOptions) => {
-    try {
-      return await api.saveInstruction(file.id, { content: text, baseHash, force })
-    } catch (error) {
-      throw nowLinkedError(error, file, home) ?? error
-    }
-  }
+  // A file that became a symlink meanwhile is refused (409 now_linked): the editor keeps the
+  // draft and says where the file points now, with no Overwrite.
+  const save = (text: string, { baseHash, force }: SaveOptions) =>
+    api.saveInstruction(file.id, { content: text, baseHash, force })
 
   return (
     <Suspense fallback={<EditorSkeleton />}>
@@ -63,18 +59,5 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
         openFrom={docAddress.instruction(file.id)}
       />
     </Suspense>
-  )
-}
-
-/**
- * The file became a symlink since it was opened (a sync from another tab):
- * the server refused the save so it cannot land in the linked file. Not a
- * 409 for the editor, so it shows this message and keeps the draft.
- */
-function nowLinkedError(error: unknown, file: InstructionFile, home: string | undefined) {
-  if (!(error instanceof HttpError) || error.body.error !== "now_linked") return null
-  const target = typeof error.body.linkTarget === "string" ? tildify(error.body.linkTarget, home) : "another file"
-  return new Error(
-    `${file.fileName} is now synced to ${target}, so this save was refused. Copy your changes, then reload the list and edit ${target}.`
   )
 }

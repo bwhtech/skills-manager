@@ -12,6 +12,7 @@ import { OVERWRITE_WARNING } from "@/features/updates/copy"
 import { skillReadOnlyReason } from "./read-only-reason"
 
 export const SKILL_MD = "SKILL.md"
+const MARKDOWN = /\.md$/i
 
 /** The draft store key of a file in a skill (lib/drafts.ts). */
 export function skillDraftKey(skillId: string, path: string) {
@@ -21,7 +22,7 @@ export function skillDraftKey(skillId: string, path: string) {
 interface SkillFileEditorProps {
   skill: SkillDetail
   path: string
-  onDirtyChange: (dirty: boolean) => void
+  onDirtyChange?: (dirty: boolean) => void
 }
 
 export function SkillFileEditor({ skill, path, onDirtyChange }: SkillFileEditorProps) {
@@ -30,7 +31,7 @@ export function SkillFileEditor({ skill, path, onDirtyChange }: SkillFileEditorP
       {path === SKILL_MD ? (
         <SkillMdEditor skill={skill} onDirtyChange={onDirtyChange} />
       ) : (
-        <OtherFileViewer skill={skill} path={path} />
+        <OtherFileEditor skill={skill} path={path} onDirtyChange={onDirtyChange} />
       )}
     </Suspense>
   )
@@ -80,7 +81,13 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
   )
 }
 
-function OtherFileViewer({ skill, path }: { skill: SkillDetail; path: string }) {
+/**
+ * Any other file of the skill folder. Markdown files of editable skills save through
+ * PUT /api/skills/:id/file (the server decides: SkillFileContent.editable); the rest is
+ * read-only. No frontmatter check: that is for SKILL.md only.
+ */
+function OtherFileEditor({ skill, path, onDirtyChange }: SkillFileEditorProps) {
+  const client = useQueryClient()
   const file = useSkillFile(skill.id, path)
   if (file.isPending) return <EditorSkeleton />
   if (file.isError) {
@@ -93,6 +100,19 @@ function OtherFileViewer({ skill, path }: { skill: SkillDetail; path: string }) 
       </Empty>
     )
   }
+  const editable = skill.editable && file.data.editable
+
+  const save = (content: string, { baseHash, force }: SaveOptions) =>
+    api.saveSkillFile(skill.id, path, { content, baseHash, force })
+
+  const saved = () => {
+    void client.invalidateQueries({ queryKey: keys.skillFile(skill.id, path) })
+    // The file tree shows sizes.
+    void client.invalidateQueries({ queryKey: keys.skill(skill.id) })
+    // The update preview diffs against the folder on disk.
+    resetUpdatePreviews(client, [skill.id])
+  }
+
   return (
     <DocumentEditor
       key={`${skill.id}:${path}`}
@@ -100,11 +120,22 @@ function OtherFileViewer({ skill, path }: { skill: SkillDetail; path: string }) 
       path={path}
       title={path}
       file={file.data}
-      readOnlyReason="Only SKILL.md is editable. Other files in the skill folder are read-only."
+      readOnlyReason={editable ? undefined : otherFileReadOnlyReason(skill, path)}
+      warning={editable && skill.origin === "npx" ? OVERWRITE_WARNING : undefined}
+      onSave={editable ? save : undefined}
+      onSaved={saved}
       onReload={async () => (await file.refetch()).data}
+      onDirtyChange={onDirtyChange}
       openFrom={docAddress.skillFile(skill.id, path)}
     />
   )
+}
+
+function otherFileReadOnlyReason(skill: SkillDetail, path: string): string {
+  const skillReason = skillReadOnlyReason(skill)
+  if (skillReason) return skillReason
+  if (!MARKDOWN.test(path)) return "Only Markdown files are editable. Other files in the skill folder are read-only."
+  return "This file cannot be edited: it links outside the skill folder, or it is not writable."
 }
 
 export function EditorSkeleton() {

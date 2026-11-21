@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { toast } from "sonner"
 import type { FileContent, SaveResponse } from "@shared/api"
-import { errorMessage, isConflict } from "@/lib/api"
+import { errorMessage, isConflict, relocation } from "@/lib/api"
 import { isMod, useWindowKeydown } from "@/lib/hotkeys"
 import { useIsDesktop } from "@/hooks/use-media-query"
 import {
@@ -22,7 +22,7 @@ import { cn } from "@/lib/utils"
 import { openLink } from "@/features/open/open-path"
 import { CodeEditor } from "./code-editor"
 import { ConflictDialog } from "./conflict-dialog"
-import { ValidationBanner, WarningLine } from "./editor-banners"
+import { RelocatedBanner, ValidationBanner, WarningLine } from "./editor-banners"
 import { EditorToolbar } from "./editor-toolbar"
 import { isMarkdownPath } from "./languages"
 import { MarkdownPreview } from "./markdown-preview"
@@ -85,6 +85,9 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   const preview = useDeferredValue(draft)
   const { openFrom } = props
   const root = useRef<HTMLDivElement>(null)
+  // A save found that the path leads to another file now (409 moved / now_linked). Saving
+  // stops in this editor: no forced save may write the draft there. Reopening remounts it.
+  const [relocated, setRelocated] = useState<{ target?: string } | null>(null)
   const onOpenLink = useCallback(
     (link: LinkTarget) => {
       if (openFrom) openLink(link, openFrom)
@@ -110,7 +113,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
   useEffect(() => () => dirtyCallback.current?.(false), [])
 
   const save = async (force = false) => {
-    if (!props.onSave || readOnlyReason) return
+    if (!props.onSave || readOnlyReason || relocated) return
     const current = getDraft(draftKey)
     if (!current || current.saving || (!isDraftDirty(current) && !force)) return
     const start = beginSave(draftKey)
@@ -123,8 +126,11 @@ export default function DocumentEditor(props: DocumentEditorProps) {
       props.onSaved?.()
       toast.success(`Saved ${title}`)
     } catch (error) {
+      // Only a content conflict opens the dialog (and its Overwrite).
       failSave(draftKey, start, { conflict: isConflict(error) })
-      if (!isConflict(error)) toast.error(`Could not save ${title}`, { description: errorMessage(error) })
+      const moved = relocation(error)
+      if (moved) setRelocated(moved)
+      else if (!isConflict(error)) toast.error(`Could not save ${title}`, { description: errorMessage(error) })
     }
   }
 
@@ -159,10 +165,11 @@ export default function DocumentEditor(props: DocumentEditorProps) {
         mode={viewMode}
         onModeChange={markdown ? setMode : undefined}
         allowSplit={isDesktop}
-        canSave={dirty && !!props.onSave}
+        canSave={dirty && !!props.onSave && !relocated}
         saving={saving}
         onSave={() => void save()}
       />
+      {relocated && <RelocatedBanner target={relocated.target} />}
       {warning && <WarningLine text={warning} />}
       <ValidationBanner problems={problems} />
       <div

@@ -40,13 +40,16 @@ to install, update and remove skills.
   agents that see it.
 - Origin badge per skill: `npx`, `manual`, `plugin`, `synced`, `system`.
   Only `npx` and `manual` skills are editable.
-- Only `SKILL.md` is editable. Other files in the skill folder are viewable, read-only.
+- In editable skills, every Markdown file (`.md`, any case) in the skill folder is editable:
+  `SKILL.md`, and others through `PUT /api/skills/:id/file`. Other file types are viewable,
+  read-only. The frontmatter check runs on `SKILL.md` only.
 - Editor: CodeMirror 6 with Markdown + YAML frontmatter + fenced code highlighting,
   Edit / Preview / Split toggle. Frontmatter check: `name` and `description` present,
   `name` matches the folder name.
 - Explicit save (button and Cmd/Ctrl+S), dirty dot, unsaved-changes guard, conflict warning
   when the file changed on disk.
-- npx skills show a fixed warning: "Update overwrites local edits." No backup, no diff.
+- npx skills show a fixed warning on every editable file: "Update overwrites local edits."
+  No backup, no diff.
 - Instruction files: `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` at user and project level.
   Create missing files. A symlinked file never opens in an editor: selecting it opens its target
   (in the target's scope), and rows show "Synced → …" and "Also read as …".
@@ -67,11 +70,18 @@ to install, update and remove skills.
 
 - Run the skills CLI non-interactively: `-y`, stdin not a TTY, env `DISABLE_TELEMETRY=1`
   and `DO_NOT_TRACK=1`, `NO_COLOR=1`. Use argument arrays (`Bun.spawn([...])`), never a shell string.
-- Never write outside paths the server discovered itself (skill `SKILL.md` files of editable
-  skills, and known instruction file paths). One exception: the file viewer (`PUT /api/file`)
+- Never write outside paths the server discovered itself (existing Markdown files listed in
+  the folder of an editable skill, whose real path stays inside that folder, and known
+  instruction file paths). One exception: the file viewer (`PUT /api/file`)
   saves an existing Markdown file (`.md`) under HOME or `/mnt/data` that a document links to,
   with the same secret deny list and checks as `GET /api/file`. It never creates a file, and
   other file types stay read-only.
+- Saves write the real path they validated (`saveTextFile` with `resolved: true`), run the
+  checks again under the save lock, and check after the rename that the path still resolves to
+  itself. Bun has no `openat`, so a same-user race that swaps a parent dir for a symlink stays
+  possible; the post-rename check logs it loudly. Same accepted limit as instruction sync.
+- Of a save's 409s, only `conflict` opens the conflict dialog (Overwrite = forced save).
+  `moved` and `now_linked` keep the draft and show a notice, with no Overwrite.
 - Mutating requests need header `X-Skills-Manager: 1` and a same-origin `Origin`.
 - Every `/api` request must name an allowed host, against DNS rebinding (403 `bad_host`).
   `localhost`, `127.0.0.1` and `[::1]` are always allowed, on any port. The other allowed host

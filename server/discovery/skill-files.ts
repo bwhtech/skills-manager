@@ -1,12 +1,15 @@
 import type { Dirent } from "node:fs"
-import { open, readdir, realpath, stat } from "node:fs/promises"
-import { extname, join, relative } from "node:path"
+import { constants } from "node:fs"
+import { access, lstat, open, readdir, realpath, stat } from "node:fs/promises"
+import { dirname, extname, join, relative } from "node:path"
 import type { FileContent, SkillFileEntry } from "../../shared/api.ts"
 import { HttpError, notFound } from "../lib/errors.ts"
-import { MAX_TEXT_BYTES, isInside, readTextFile } from "../lib/files.ts"
+import { MAX_TEXT_BYTES, isInside, readTextFile, realpathOrNull } from "../lib/files.ts"
 import { requireRelativePath } from "../lib/validate.ts"
 
 const MAX_ENTRIES = 500
+const MARKDOWN = /\.md$/i
+export const MARKDOWN_ONLY = "Only Markdown files can be edited"
 /** Folders a skill file tree skips. */
 export const SKIP_DIRS = new Set([".git", "node_modules"])
 const TEXT_EXT = new Set([
@@ -129,6 +132,46 @@ export async function readSkillFile(
   if (!(await isTextFile(real, info.size)))
     throw new HttpError(415, "binary", "Only text files can be shown")
   return readTextFile(real)
+}
+
+/** 403 read_only: the file exists but may not be saved. */
+export function readOnly(detail: string): HttpError {
+  return new HttpError(403, "read_only", detail)
+}
+
+/**
+ * Real path of a file of the skill folder that a save may write, or the HttpError that says
+ * why not: 404 when missing (nothing is ever created), 403 read_only otherwise. The file
+ * must be listed in the folder's files as text (so not under a symlinked dir or a skipped
+ * one), its asked and real names must end in .md (any case), its real path must stay inside
+ * the folder, and it must be a regular file of at most 1 MB with no NUL bytes. `root` must be
+ * a real path. Says nothing about the skill's origin: the caller checks `editable`.
+ */
+export async function editableSkillFile(root: string, rel: string): Promise<string> {
+  if (rel.split("/").some((p) => SKIP_DIRS.has(p))) throw notFound("File not found")
+  const path = join(root, rel)
+  if (!(await lstat(path).catch(() => null))) throw notFound("File not found")
+  if (!MARKDOWN.test(rel)) throw readOnly(MARKDOWN_ONLY)
+  const real = await realpathOrNull(path)
+  if (!real) throw notFound("File not found")
+  if (real === root || !isInside(root, real))
+    throw readOnly("Only files inside the skill folder can be edited")
+  if (!MARKDOWN.test(real)) throw readOnly(MARKDOWN_ONLY)
+  const info = await stat(real)
+  if (!info.isFile()) throw notFound("Not a file")
+  if (info.size > MAX_TEXT_BYTES) throw readOnly("Files larger than 1 MB cannot be edited")
+  if (await hasNulByte(real, 8192)) throw readOnly("Binary files cannot be edited")
+  const listed = (await listSkillFiles(root)).some((entry) => entry.path === rel && entry.isText)
+  if (!listed) throw readOnly("Only files listed in the skill folder can be edited")
+  return real
+}
+
+/** editableSkillFile passes, and this process can replace the file (temp file + rename). */
+export async function isEditableSkillFile(root: string, rel: string): Promise<boolean> {
+  const real = await editableSkillFile(root, rel).catch(() => null)
+  if (!real) return false
+  const writable = (p: string) => access(p, constants.W_OK).then(() => true, () => false)
+  return (await writable(real)) && (await writable(dirname(real)))
 }
 
 async function walk(

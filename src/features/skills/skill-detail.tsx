@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react"
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react"
 import { decodeId, type SkillDetail } from "@shared/api"
 import { ScreenBar, StackScreen } from "@/components/layout/stack-screen"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
@@ -16,7 +16,7 @@ import { SkillInfo } from "./skill-info"
 
 export function SkillDetailPane({ skillId, file }: { skillId: string; file: string | null }) {
   const skill = useSkill(skillId)
-  const [dirty, setDirty] = useState(false)
+  const dirtyPaths = useDirtyFiles(skillId, skill.data?.files)
 
   if (skill.isPending) return <DetailSkeleton />
   if (skill.isError) return <SkillError skillId={skillId} error={skill.error} />
@@ -33,7 +33,7 @@ export function SkillDetailPane({ skillId, file }: { skillId: string; file: stri
             <FileTree
               files={data.files}
               selectedPath={path}
-              dirtyPath={dirty ? SKILL_MD : null}
+              dirtyPaths={dirtyPaths}
               onSelect={(next) => navigate({ file: next === SKILL_MD ? null : next })}
             />
             <Separator />
@@ -42,11 +42,22 @@ export function SkillDetailPane({ skillId, file }: { skillId: string; file: stri
         </ResizablePanel>
         <ResizableHandle />
         <ResizablePanel minSize={320}>
-          <SkillFileEditor key={`${data.id}:${path}`} skill={data} path={path} onDirtyChange={setDirty} />
+          <SkillFileEditor key={`${data.id}:${path}`} skill={data} path={path} />
         </ResizablePanel>
       </ResizablePanelGroup>
     </div>
   )
+}
+
+/** Files of the skill with unsaved edits in the draft store (also editors not mounted now). */
+function useDirtyFiles(skillId: string, files: SkillDetail["files"] | undefined): ReadonlySet<string> {
+  const joined = useSyncExternalStore(subscribeDrafts, () =>
+    (files ?? [])
+      .filter((entry) => isDraftDirty(getDraft(skillDraftKey(skillId, entry.path))))
+      .map((entry) => entry.path)
+      .join("\n")
+  )
+  return useMemo(() => new Set(joined ? joined.split("\n") : []), [joined])
 }
 
 /** The file to show: the one asked for if it is a known text file, else SKILL.md. */
@@ -99,6 +110,7 @@ function useFollowMovedSkill(goneId: string | null) {
 export function SkillScreens({ skillId, file }: { skillId: string; file: string | null }) {
   const skill = useSkill(skillId)
   const [dirty, setDirty] = useState(false)
+  const dirtyPaths = useDirtyFiles(skillId, skill.data?.files)
   // Desktop shows SKILL.md at file=null. If it has a draft when the layout
   // switches to this one, open its screen, so the draft stays in view.
   const skillMdDirty = useSyncExternalStore(subscribeDrafts, () =>
@@ -128,7 +140,7 @@ export function SkillScreens({ skillId, file }: { skillId: string; file: string 
             <FileTree
               files={skill.data.files}
               selectedPath={file ? path : ""}
-              dirtyPath={dirty ? SKILL_MD : null}
+              dirtyPaths={dirtyPaths}
               onSelect={(next) => navigate({ file: next })}
             />
             <Separator />

@@ -88,10 +88,16 @@ export class PathOpener {
     const path = requireAbsolute(rawPath)
     const real = await this.checkedFile(path, { outside: () => forbidden("Only files under HOME and /mnt/data can be edited") })
     if (!MARKDOWN.test(path) || !MARKDOWN.test(real)) throw new HttpError(403, "read_only", READ_ONLY_REFUSAL)
+    // Under the lock: the asked path still leads to `real`, and `real` itself still passes the
+    // root, secret and file checks (it is the exact path the save writes, with no second realpath).
     const guard = async () => {
-      if ((await this.checkedFile(path)) !== real) throw new HttpError(409, "moved", "The file was moved or replaced; reload it")
+      const now = await this.checkedFile(path)
+      if (now !== real)
+        throw new HttpError(409, "moved", "The file was moved or replaced; reload it", { currentPath: now })
+      if ((await this.checkedFile(real)) !== real)
+        throw new HttpError(409, "moved", "The file was moved or replaced; reload it")
     }
-    return saveTextFile(real, req, { guard })
+    return saveTextFile(real, req, { resolved: true, guard })
   }
 
   private async absolute(path: string, from: unknown): Promise<string> {

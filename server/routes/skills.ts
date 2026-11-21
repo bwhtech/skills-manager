@@ -5,19 +5,23 @@ import type {
   SaveRequest,
   SaveResponse,
   SkillDetail,
+  SkillFileContent,
   SkillSummary,
   UpdatePreview,
 } from "../../shared/api.ts"
 import { isRemovable, type IndexedSkill } from "../discovery/skill-index.ts"
 import {
   containedSkillMd,
+  editableSkillFile,
+  isEditableSkillFile,
   listSkillFiles,
+  readOnly,
   readSkillFile,
   readSkillMd,
 } from "../discovery/skill-files.ts"
 import { badRequest, forbidden, HttpError, notFound, readJson } from "../lib/errors.ts"
-import { saveTextFile } from "../lib/files.ts"
-import { decodePathId, requireScope } from "../lib/validate.ts"
+import { isInside, realpathOrNull, saveTextFile } from "../lib/files.ts"
+import { decodePathId, requireRelativePath, requireScope } from "../lib/validate.ts"
 import { requireShownPlan, toPublic } from "../removal/guard.ts"
 import type { Services } from "../services.ts"
 
@@ -59,7 +63,30 @@ export function skillRoutes(svc: Services): Hono {
 
   app.get("/skills/:id/file", async (c) => {
     const skill = await lookup(c.req.param("id"))
-    return c.json(await readSkillFile(skill.realPath, c.req.query("path")))
+    const raw = c.req.query("path")
+    const file = await readSkillFile(skill.realPath, raw)
+    const editable = skill.editable && (await isEditableSkillFile(skill.realPath, requireRelativePath(raw)))
+    const body: SkillFileContent = { ...file, editable }
+    return c.json(body)
+  })
+
+  // Any Markdown file of an editable skill. Writes the validated real path as is, after the
+  // same checks run again under the save lock (see saveTextFile `resolved`).
+  app.put("/skills/:id/file", async (c) => {
+    const skill = await lookup(c.req.param("id"))
+    if (!skill.editable) throw readOnly(`This skill is read-only: ${readOnlyReason(skill)}`)
+    const rel = requireRelativePath(c.req.query("path"))
+    const root = skill.realPath
+    const real = await editableSkillFile(root, rel)
+    const guard = async () => {
+      const now = await editableSkillFile(root, rel)
+      if (now !== real || (await realpathOrNull(real)) !== real || !isInside(root, real))
+        throw new HttpError(409, "moved", "The file was moved or replaced; reload it", { currentPath: now })
+    }
+    const body: SaveResponse = await saveTextFile(real, await readJson<SaveRequest>(c), { resolved: true, guard })
+    // The frontmatter feeds the skill index.
+    if (real === (await containedSkillMd(root))) svc.skills.invalidate()
+    return c.json(body)
   })
 
   app.get("/skills/:id/update-preview", async (c) => {
@@ -87,10 +114,14 @@ export function skillRoutes(svc: Services): Hono {
     const target = await containedSkillMd(skill.realPath)
     if (!target)
       throw forbidden("SKILL.md is missing or links outside the skill folder")
-    const body: SaveResponse = await saveTextFile(
-      target,
-      await readJson<SaveRequest>(c)
-    )
+    const guard = async () => {
+      if ((await containedSkillMd(skill.realPath)) !== target)
+        throw new HttpError(409, "moved", "SKILL.md was moved or replaced; reload it")
+    }
+    const body: SaveResponse = await saveTextFile(target, await readJson<SaveRequest>(c), {
+      resolved: true,
+      guard,
+    })
     svc.skills.invalidate()
     return c.json(body)
   })
@@ -153,6 +184,20 @@ export function toSummary(skill: IndexedSkill, svc: Pick<Services, "updates">): 
     removable: isRemovable(skill),
     updateAvailable,
     ...(deletedUpstream ? { deletedUpstream } : {}),
+  }
+}
+
+/** Why a skill is read-only, as the save refusal says it. */
+function readOnlyReason(skill: IndexedSkill): string {
+  switch (skill.origin) {
+    case "plugin":
+      return `provided by the ${skill.pluginName ?? "Claude Code"} plugin; plugin updates replace it`
+    case "synced":
+      return "synced from claude.ai; edit it on claude.ai"
+    case "system":
+      return "a built-in skill of an agent; the agent manages it"
+    default:
+      return `${skill.origin} skills cannot be edited`
   }
 }
 

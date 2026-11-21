@@ -58,6 +58,13 @@ export async function canonicalPath(path: string): Promise<string> {
 export interface SaveOptions {
   /** lock (and write) this path instead of canonicalPath(target) */
   lockKey?: string
+  /**
+   * `target` is a real path the caller validated: lock and write exactly it, with no second
+   * realpath (which could resolve elsewhere than the checked path if a parent dir became a
+   * symlink in between). The guard should check that path again; after the rename the save
+   * checks that the written path still resolves to itself and logs loudly if not.
+   */
+  resolved?: boolean
   /** runs under the lock before the hash check; throw to refuse the save */
   guard?: () => Promise<void>
 }
@@ -74,7 +81,7 @@ export async function saveTextFile(
   if (!req.force && typeof req.baseHash !== "string")
     throw badRequest("baseHash is required unless force is set")
   const content = req.content
-  const real = options.lockKey ?? (await canonicalPath(target))
+  const real = options.lockKey ?? (options.resolved ? target : await canonicalPath(target))
   return withPathLock(real, async () => {
     await options.guard?.()
     const current = await stat(real)
@@ -88,8 +95,24 @@ export async function saveTextFile(
       }
     }
     const mtimeMs = await atomicWrite(real, content, current.mode & 0o7777)
+    if (options.resolved) await checkStillResolved(real)
     return { mtimeMs, hash: contentHash(content) }
   })
+}
+
+/**
+ * After a save to a validated real path: the path must still resolve to itself. If not, a
+ * parent dir was swapped for a symlink during the save, and the bytes may have landed
+ * somewhere else. Bun has no openat (no dir-handle-relative writes), so this same-user race
+ * stays open; it is the same accepted limit as instruction sync. Log it loudly.
+ */
+async function checkStillResolved(path: string): Promise<void> {
+  const now = await realpathOrNull(path)
+  if (now === path) return
+  console.error(
+    `SECURITY: a save to ${path} may have been redirected: the path now resolves to ${now ?? "nothing"}`
+  )
+  throw new HttpError(500, "redirected", `The save may have been redirected: ${path} now resolves to ${now ?? "nothing"}`)
 }
 
 const pathLocks = new Map<string, Promise<unknown>>()

@@ -39,27 +39,14 @@ import {
   type UpdateRunRequest,
   type UpdateStatus,
   type UpdateTarget,
+  type SkillFileContent,
   type ViewedFileContent,
   updateTargetsOverlap,
 } from "@shared/api"
 import { requestGeneration } from "./drafts"
+import { HttpError } from "./http-error"
 
-/** A non-2xx response, with the parsed ApiError body. */
-export class HttpError extends Error {
-  readonly status: number
-  readonly body: ApiError & Record<string, unknown>
-
-  constructor(status: number, body: ApiError & Record<string, unknown>) {
-    super(body.detail ? `${body.error}: ${body.detail}` : body.error)
-    this.name = "HttpError"
-    this.status = status
-    this.body = body
-  }
-}
-
-export function isConflict(error: unknown): error is HttpError {
-  return error instanceof HttpError && error.status === 409
-}
+export { HttpError, isConflict, relocation } from "./http-error"
 
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
@@ -121,8 +108,13 @@ export const api = {
     const detail = await request<SkillDetail>("GET", `/api/skills/${id}`)
     return { ...detail, skillMd: loaded(detail.skillMd, generation) }
   },
-  skillFile: (id: string, path: string) =>
-    request<FileContent>("GET", `/api/skills/${id}/file?${q({ path })}`),
+  skillFile: async (id: string, path: string) => {
+    const generation = requestGeneration()
+    const file = await request<SkillFileContent>("GET", `/api/skills/${id}/file?${q({ path })}`)
+    return { ...file, generation }
+  },
+  saveSkillFile: (id: string, path: string, body: SaveRequest) =>
+    request<SaveResponse>("PUT", `/api/skills/${id}/file?${q({ path })}`, body),
   saveSkillMd: (id: string, body: SaveRequest) =>
     request<SaveResponse>("PUT", `/api/skills/${id}/skill-md`, body),
   removeSkill: ({ id, body }: { id: string; body?: RemoveSkillRequest }) =>

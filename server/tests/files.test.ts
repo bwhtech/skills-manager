@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
   symlink,
@@ -124,6 +125,39 @@ describe("saveTextFile", () => {
     await writeFile(file, "a")
     await saveTextFile(file, { content: "b", force: true })
     expect(await readFile(file, "utf8")).toBe("b")
+  })
+
+  test("resolved: writes the target as given and reports a redirect after the rename", async () => {
+    const real = await realpath(dir)
+    const parent = join(real, "resolved-parent")
+    const elsewhere = join(real, "resolved-elsewhere")
+    await mkdir(parent)
+    await mkdir(elsewhere)
+    await writeFile(join(parent, "a.md"), "a")
+    await writeFile(join(elsewhere, "a.md"), "other")
+    const target = join(parent, "a.md")
+    const ok = await saveTextFile(target, { content: "a2", baseHash: sha("a") }, { resolved: true })
+    expect(ok.hash).toBe(sha("a2"))
+
+    // A parent dir swapped for a symlink during the save: the write goes through it, and the
+    // check after the rename sees that the path no longer resolves to itself.
+    const errors: unknown[] = []
+    const log = console.error
+    console.error = (...args: unknown[]) => void errors.push(args)
+    try {
+      const swap = async () => {
+        await rename(parent, `${parent}.moved`)
+        await symlink(elsewhere, parent)
+      }
+      const err = await saveTextFile(target, { content: "x", force: true }, { resolved: true, guard: swap }).catch(
+        (e: unknown) => e
+      )
+      expect(err).toBeInstanceOf(HttpError)
+      expect((err as HttpError).message).toBe("redirected")
+      expect(errors.length).toBe(1)
+    } finally {
+      console.error = log
+    }
   })
 })
 

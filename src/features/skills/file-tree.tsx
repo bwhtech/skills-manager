@@ -47,11 +47,12 @@ function rank(node: TreeNode) {
 interface FileTreeProps {
   files: SkillFileEntry[]
   selectedPath: string
-  dirtyPath: string | null
+  /** files with unsaved edits */
+  dirtyPaths: ReadonlySet<string>
   onSelect: (path: string) => void
 }
 
-export function FileTree({ files, selectedPath, dirtyPath, onSelect }: FileTreeProps) {
+export function FileTree({ files, selectedPath, dirtyPaths, onSelect }: FileTreeProps) {
   const tree = useMemo(() => buildTree(files), [files])
   return (
     <ul role="tree" aria-label="Skill files" className="flex flex-col gap-px p-2 text-xs">
@@ -61,7 +62,7 @@ export function FileTree({ files, selectedPath, dirtyPath, onSelect }: FileTreeP
           node={node}
           depth={0}
           selectedPath={selectedPath}
-          dirtyPath={dirtyPath}
+          dirtyPaths={dirtyPaths}
           onSelect={onSelect}
         />
       ))}
@@ -74,7 +75,7 @@ interface TreeItemProps extends Omit<FileTreeProps, "files"> {
   depth: number
 }
 
-function TreeItem({ node, depth, selectedPath, dirtyPath, onSelect }: TreeItemProps) {
+function TreeItem({ node, depth, selectedPath, dirtyPaths, onSelect }: TreeItemProps) {
   const [open, setOpen] = useState(depth < 1 || selectedPath.startsWith(node.path + "/"))
   const indent = { paddingLeft: `${8 + depth * 14}px` }
   const rowClass =
@@ -100,7 +101,7 @@ function TreeItem({ node, depth, selectedPath, dirtyPath, onSelect }: TreeItemPr
                 node={child}
                 depth={depth + 1}
                 selectedPath={selectedPath}
-                dirtyPath={dirtyPath}
+                dirtyPaths={dirtyPaths}
                 onSelect={onSelect}
               />
             ))}
@@ -133,7 +134,7 @@ function TreeItem({ node, depth, selectedPath, dirtyPath, onSelect }: TreeItemPr
           className="size-3.5 shrink-0 text-muted-foreground"
         />
         <span className="min-w-0 flex-1 truncate">{node.name}</span>
-        <DirtyDot dirty={dirtyPath === entry.path} />
+        <DirtyDot dirty={dirtyPaths.has(entry.path)} />
       </button>
     </li>
   )

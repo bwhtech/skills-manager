@@ -157,11 +157,35 @@ export interface FileContent {
   hash: string
 }
 
+/** A file of a skill folder (GET /api/skills/:id/file). */
+export interface SkillFileContent extends FileContent {
+  /**
+   * PUT /api/skills/:id/file would accept it: an editable skill (npx, manual), a Markdown
+   * file (.md, any case) listed in its files, inside the folder, writable. Else read-only.
+   */
+  editable: boolean
+}
+
 // GET /api/skills/:id                    -> SkillDetail
-// GET /api/skills/:id/file?path=<rel>    -> FileContent (text files only, max 1 MB, read-only)
+// GET /api/skills/:id/file?path=<rel>    -> SkillFileContent (text files only, max 1 MB)
+// PUT /api/skills/:id/file?path=<rel>  SaveRequest -> SaveResponse
+//   Saves an existing Markdown file of an editable skill (SKILL.md too; the UI saves that one
+//   through /skill-md). The file must be listed in SkillDetail.files as text, its name as asked
+//   and its real name must end in .md (any case), its real path must stay inside the skill's
+//   real folder (no symlinks out), and it must be a regular file of at most 1 MB, not binary.
+//   Writes that real path (the file mode stays); the checks run again under the save lock.
+//   403 read_only "This skill is read-only: <reason>" (plugin, synced, system) or with why the
+//   file cannot be edited ("Only Markdown files can be edited", ...). 404 when missing: no file
+//   is ever created. 409 SaveConflict if the file no longer has baseHash; 409 moved
+//   {currentPath?} if the path now leads to another real file.
 // PUT /api/skills/:id/skill-md  SaveRequest -> SaveResponse
 //   403 if the skill is not editable. 409 SaveConflict if the file on disk no longer
 //   has baseHash (compared under a per-file lock keyed by the canonical path).
+//   409 moved if SKILL.md now leads to another real file.
+//
+// Of a save's 409s, only `error: "conflict"` (SaveConflict) means "changed on disk": only it
+// may lead to a forced save. `moved` and `now_linked` mean the path leads elsewhere now; the
+// client keeps the draft and never overwrites.
 // GET /api/skills/:id/removal-plan       -> RemovalPlan  (npx skills only; 400 otherwise)
 //   What DELETE would do. An explicit Remove counts a copy at an agent install path as part of
 //   the install only when the canonical folder exists, the copy's full inventory is identical
@@ -747,8 +771,8 @@ export type OpenResult =
 //   mode stays. The same checks as GET, on the asked and the real path, except that a real
 //   path outside HOME and /mnt/data is 403 here. 403 read_only ("Only Markdown files can be
 //   edited here") for any other file; no file is ever created (404 when missing). 409
-//   SaveConflict if the file no longer has baseHash, 409 moved if the path now leads to
-//   another real file (both checked under the per-file save lock).
+//   SaveConflict if the file no longer has baseHash, 409 moved {currentPath?} if the path now
+//   leads to another real file (both checked under the per-file save lock).
 
 /** A file the viewer shows. */
 export interface ViewedFileContent extends FileContent {
