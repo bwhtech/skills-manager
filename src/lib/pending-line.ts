@@ -7,10 +7,18 @@
 let pending: { key: string; line: number } | null = null
 const editors = new Map<string, Set<() => void>>()
 
-/** Ask the editor for `key` to show `line`. Replaces any older request; no line clears it. */
-export function requestLine(key: string, line: number | undefined) {
-  pending = line ? { key, line } : null
-  if (pending) for (const onRequest of editors.get(key) ?? []) onRequest()
+/**
+ * Ask the editor for `key` to show `line`. Replaces any older request; no line clears it.
+ * Returns a function that withdraws this request if it is still waiting (the user left
+ * before the editor took it), so a later, unrelated visit to the document never jumps.
+ */
+export function requestLine(key: string, line: number | undefined): () => void {
+  const request = line ? { key, line } : null
+  pending = request
+  if (request) for (const onRequest of editors.get(key) ?? []) onRequest()
+  return () => {
+    if (pending === request) pending = null
+  }
 }
 
 /** The requested line for this editor, once. */

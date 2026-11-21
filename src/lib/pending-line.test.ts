@@ -56,3 +56,16 @@ describe("pending-line", () => {
     expect(hasLineEditor("a")).toBe(false)
   })
 })
+
+test("a withdrawn request is never taken by a later visit", () => {
+  const withdraw = requestLine("doc-a", 42)
+  withdraw()
+  expect(takePendingLine("doc-a")).toBeUndefined()
+})
+
+test("withdrawing an old request leaves a newer one alone", () => {
+  const withdrawOld = requestLine("doc-a", 10)
+  requestLine("doc-a", 20)
+  withdrawOld()
+  expect(takePendingLine("doc-a")).toBe(20)
+})

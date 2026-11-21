@@ -1,7 +1,7 @@
 import { toast } from "sonner"
 import type { OpenResult, ScopeKey } from "@shared/api"
 import { HttpError, api, errorMessage } from "@/lib/api"
-import { getPlace, navigate, type Place } from "@/lib/hash-state"
+import { getPlace, navigate, subscribePlace, type Place } from "@/lib/hash-state"
 import type { LinkTarget } from "@/lib/path-links"
 import { hasLineEditor, requestLine } from "@/lib/pending-line"
 import { ui } from "@/lib/ui-store"
@@ -40,9 +40,23 @@ async function openPath(raw: string, from: string) {
   ui.closeFile()
   const { key, place } = destination(result)
   // The document is open already (also SKILL.md at file=null): show the line, no move.
-  if (hasLineEditor(key)) return requestLine(key, result.line)
-  // The move goes through the unsaved-changes guard; the line is requested only once it is accepted.
-  navigate(place, { onAccept: () => requestLine(key, result.line) })
+  if (hasLineEditor(key)) {
+    requestLine(key, result.line)
+    return
+  }
+  // The move goes through the unsaved-changes guard; the line is requested only once it is
+  // accepted, and withdrawn if the user leaves the destination before its editor takes it.
+  navigate(place, {
+    onAccept: () => {
+      const arrived = window.location.hash
+      const withdraw = requestLine(key, result.line)
+      const stop = subscribePlace(() => {
+        if (window.location.hash === arrived) return
+        withdraw()
+        stop()
+      })
+    },
+  })
 }
 
 /** Where a skill file or instruction file opens: its line-request key and its place. */

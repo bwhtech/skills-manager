@@ -57,6 +57,11 @@ export function getPlace(): Place {
   return cachedPlace
 }
 
+/** Calls `listener` whenever the shown place changes. Returns the unsubscribe function. */
+export function subscribePlace(listener: () => void) {
+  return subscribe(listener)
+}
+
 function subscribe(listener: () => void) {
   listeners.add(listener)
   return () => {
