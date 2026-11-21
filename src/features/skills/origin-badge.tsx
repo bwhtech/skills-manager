@@ -29,6 +29,20 @@ export function OriginBadge({ origin, className }: { origin: SkillOrigin; classN
   )
 }
 
+/** The skill has `disable-model-invocation: true`: it runs only when invoked explicitly. */
+export function ExplicitBadge({ skill, className }: { skill: Pick<SkillSummary, "explicitOnly" | "name">; className?: string }) {
+  if (!skill.explicitOnly) return null
+  return (
+    <Badge
+      variant="secondary"
+      title={`Model invocation disabled: the agent never runs it on its own. Invoke it explicitly, e.g. /${skill.name}`}
+      className={cn("h-5 px-1.5 font-normal", className)}
+    >
+      explicit
+    </Badge>
+  )
+}
+
 /** "update", or "Updating…" while an update job for the skill is queued or running. */
 export function UpdateBadge({ skill }: { skill: Pick<SkillSummary, "scope" | "name" | "cliName"> }) {
   const running = useIsBeingUpdated(skill.scope, cliNameOf(skill))

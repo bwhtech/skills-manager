@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge"
 import { useScopes } from "@/lib/api"
 import { scopeLabel } from "@/lib/format"
 import { usePlace } from "@/lib/hash-state"
-import { OriginBadge, UpstreamBadge } from "./origin-badge"
+import { ExplicitBadge, OriginBadge, UpstreamBadge } from "./origin-badge"
 import { skillReadOnlyReason } from "./read-only-reason"
 import { RemoveSkillButton } from "./remove-skill-button"
 import { UpdateSkillButton } from "./update-skill-button"
@@ -27,6 +27,7 @@ export function SkillHeader({ skill }: { skill: SkillDetail }) {
       <div className="flex min-h-7 items-center gap-2 max-md:flex-wrap max-md:gap-y-1.5">
         <h2 className="min-w-0 truncate text-base font-semibold max-md:hidden">{skill.name}</h2>
         <OriginBadge origin={skill.origin} />
+        <ExplicitBadge skill={skill} />
         <UpstreamBadge skill={skill} />
         {readOnly && (
           <Badge variant="secondary" className="h-5 px-1.5 font-normal" title={readOnly}>

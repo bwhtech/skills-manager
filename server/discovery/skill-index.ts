@@ -159,6 +159,7 @@ export class SkillIndex {
       id: encodeId(realPath),
       name,
       description: meta.description,
+      ...(meta.explicitOnly ? { explicitOnly: true } : {}),
       realPath,
       locations: [...new Set(locs.map((l) => l.path))].sort(),
       agents: [...agents].sort(),
@@ -244,17 +245,19 @@ export function dedupe(skills: IndexedSkill[]): IndexedSkill[] {
 
 async function readMeta(
   realPath: string
-): Promise<{ name: string; description: string }> {
+): Promise<{ name: string; description: string; explicitOnly: boolean }> {
+  const none = { name: "", description: "", explicitOnly: false }
   try {
     const skillMd = await containedSkillMd(realPath)
-    if (!skillMd) return { name: "", description: "" }
+    if (!skillMd) return none
     const text = await readFile(skillMd, "utf8")
     const { data } = parseFrontmatter(text)
     return {
       name: stringField(data, "name"),
       description: stringField(data, "description"),
+      explicitOnly: stringField(data, "disable-model-invocation").toLowerCase() === "true",
     }
   } catch {
-    return { name: "", description: "" }
+    return none
   }
 }

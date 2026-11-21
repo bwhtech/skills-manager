@@ -122,6 +122,11 @@ export interface SkillSummary {
   pluginName?: string // origin === "plugin"
   updateAvailable: boolean // from the last update check
   /**
+   * Frontmatter `disable-model-invocation: true`: the agent never picks this skill on its
+   * own; it runs only when invoked explicitly (e.g. /name). Shown as the "explicit" tag.
+   */
+  explicitOnly?: boolean
+  /**
    * npx skills: the last update check (or an update job, or a preview) found the skill
    * deleted upstream. `skills update` skips it; see UpdateStatus.deletedUpstream.
    * updateAvailable is then false.
