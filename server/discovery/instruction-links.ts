@@ -1,69 +1,127 @@
 // Sync via symlink: turn one known instruction file into a symlink to another,
 // and back. Callers pass only files the server discovered itself.
+//
+// Every operation takes the per-path locks (lib/files.ts) of both ends, in
+// sorted order, keyed by fileLocation. Saves of instruction files lock the
+// same keys, so a link, an unlink and a save of either end never interleave.
+// Under the locks each end is probed again with lstat right before the change,
+// and the result is checked after it. Disk changes from outside the app are
+// handled with no-replace steps (rename to a fresh name, link, symlink), so a
+// file that appears meanwhile is never overwritten.
 import {
-  chmod,
+  link,
   lstat,
   mkdir,
   readFile,
-  realpath,
+  readlink,
   rename,
   stat,
   symlink,
   unlink,
   writeFile,
+  chmod,
 } from "node:fs/promises"
 import { basename, dirname, join, relative } from "node:path"
 import { HttpError } from "../lib/errors.ts"
 import {
   MAX_TEXT_BYTES,
   contentHash,
+  fileLocation,
   isInside,
   realpathOrNull,
-  withPathLock,
+  withPathLocks,
 } from "../lib/files.ts"
 
-/** One side of a link, as it is on disk now. */
-export interface LinkEnd {
-  id: string
+export type EntryKind = "file" | "link" | "missing" | "other"
+
+/** One path as it is on disk now. */
+export interface Probe {
   path: string
-  isLink: boolean
-  /** for a link: its target exists */
-  exists: boolean
-  /** real path when it exists */
+  /** fileLocation(path): the lock key */
+  location: string
+  kind: EntryKind
+  /** real path: the file itself, or a link's resolved target (null if broken) */
   real: string | null
+  /** for a link: what its resolved target is */
+  targetKind?: EntryKind
+  /** hard link count of a regular file */
+  nlink: number
+}
+
+export async function probe(path: string): Promise<Probe> {
+  const location = await fileLocation(path)
+  const info = await lstat(path).catch(() => null)
+  if (!info) return { path, location, kind: "missing", real: null, nlink: 0 }
+  if (info.isSymbolicLink()) {
+    const real = await realpathOrNull(path)
+    const target = real ? await stat(real).catch(() => null) : null
+    return {
+      path,
+      location,
+      kind: "link",
+      real,
+      targetKind: !target ? "missing" : target.isFile() ? "file" : "other",
+      nlink: info.nlink,
+    }
+  }
+  return {
+    path,
+    location,
+    kind: info.isFile() ? "file" : "other",
+    real: await realpathOrNull(path),
+    nlink: info.nlink,
+  }
+}
+
+interface End {
+  id: string
+  probe: Probe
 }
 
 /** Why source cannot become a link to target, or null when it can. */
-export function checkLink(source: LinkEnd, target: LinkEnd): HttpError | null {
+export function checkLink(source: End, target: End): HttpError | null {
+  const s = source.probe
+  const t = target.probe
   if (source.id === target.id)
     return new HttpError(400, "self_link", "A file cannot be synced to itself")
-  if (target.isLink)
+  if (t.kind === "link")
     return new HttpError(
       400,
       "target_is_link",
-      `${target.path} is itself a symlink. Sync to the real file${target.real ? ` (${target.real})` : ""} instead.`
+      `${t.path} is itself a symlink. Sync to the real file${t.real ? ` (${t.real})` : ""} instead.`
     )
-  if (!target.exists || !target.real)
+  if (t.kind === "missing")
     return new HttpError(400, "target_missing", "The target file does not exist")
-  if (source.isLink) {
+  if (t.kind === "other")
+    return new HttpError(400, "target_not_file", `${t.path} is not a regular file`)
+  if (s.kind === "link") {
     const detail =
-      source.real === target.real
+      s.real === t.real
         ? "Already synced to this file"
         : "Already a symlink. Stop syncing it first."
     return new HttpError(409, "already_linked", detail)
   }
-  if (source.real && source.real === target.real)
+  if (s.kind === "other")
+    return new HttpError(400, "source_not_file", `${s.path} is not a regular file`)
+  if (t.real === s.location || (s.real && t.real === s.real))
     return new HttpError(
       400,
       "cycle",
-      `${target.path} resolves to ${source.path}: the link would point at itself`
+      `${t.path} resolves to ${s.path}: the link would point at itself`
+    )
+  if (s.kind === "file" && s.nlink > 1)
+    return new HttpError(
+      409,
+      "hard_linked",
+      `${s.path} has ${s.nlink} hard links. A symlink would replace only this name and split them. Remove the other hard links first.`
     )
   return null
 }
 
 /**
- * The backup path for a file: <path>.bak, or <path>.bak-<time> (then -2, -3…)
- * when that exists. Only a suggestion: writeBackup never overwrites.
+ * The backup path the link would use now: <path>.bak, or <path>.bak-<time>
+ * (then -2, -3…). Only a preview: the link reserves the name with link(2),
+ * which never replaces a file.
  */
 export async function backupPathFor(path: string): Promise<string> {
   for (const candidate of backupCandidates(path)) {
@@ -83,15 +141,11 @@ function* backupCandidates(path: string): Generator<string> {
   for (let n = 2; n < 1000; n++) yield `${path}.bak-${stamp}-${n}`
 }
 
-/** Writes the backup with O_EXCL, so an existing backup is never replaced. */
-async function writeBackup(
-  path: string,
-  bytes: Uint8Array,
-  mode: number
-): Promise<string> {
+/** Gives `from` a backup name with link(2): EEXIST tries the next name. */
+async function linkAsBackup(from: string, path: string): Promise<string> {
   for (const candidate of backupCandidates(path)) {
     try {
-      await writeFile(candidate, bytes, { flag: "wx", mode })
+      await link(from, candidate)
       return candidate
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err
@@ -100,151 +154,226 @@ async function writeBackup(
   throw new HttpError(500, "internal", "No free backup name")
 }
 
-/** Where the file itself lives: its real parent dir plus its name. */
-async function location(path: string): Promise<string> {
-  const dir = (await realpathOrNull(dirname(path))) ?? dirname(path)
-  return join(dir, basename(path))
+/** A fresh, unused name next to path. */
+function scratchName(path: string, tag: string): string {
+  return join(
+    dirname(path),
+    `.${basename(path)}.${crypto.randomUUID().slice(0, 8)}.${tag}`
+  )
 }
 
 /** Relative when both files are under HOME, else absolute. */
 async function linkText(
   sourceLocation: string,
-  target: LinkEnd,
+  targetReal: string,
   home: string
 ): Promise<string> {
   const homes = [home, (await realpathOrNull(home)) ?? home]
   const under = (p: string) => homes.some((h) => isInside(h, p))
-  const real = target.real!
-  if (under(sourceLocation) && under(real))
-    return relative(dirname(sourceLocation), real)
-  return real
+  if (under(sourceLocation) && under(targetReal))
+    return relative(dirname(sourceLocation), targetReal)
+  return targetReal
+}
+
+/** Puts the file at `backup` back at `path`, never over a file that appeared there. */
+async function restoreBackup(backup: string, path: string): Promise<boolean> {
+  try {
+    await link(backup, path)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false
+    throw err
+  }
+  await unlink(backup)
+  return true
+}
+
+export interface LinkIds {
+  sourceId: string
+  targetId: string
 }
 
 export async function linkFile(
-  source: LinkEnd,
-  target: LinkEnd,
+  sourcePath: string,
+  targetPath: string,
+  ids: LinkIds,
   options: { baseHash?: string; home: string }
 ): Promise<{ backupPath: string | null }> {
-  const problem = checkLink(source, target)
-  if (problem) throw problem
-  const dir = dirname(source.path)
-  await mkdir(dir, { recursive: true })
-  const sourceLocation = await location(source.path)
-  // The same key a save of the regular source file locks (its real path).
-  return withPathLock(sourceLocation, async () => {
-    // Check again under the lock: the disk may have changed since the preview.
-    const info = await lstat(source.path).catch(() => null)
-    if (info?.isSymbolicLink())
-      throw new HttpError(
-        409,
-        "already_linked",
-        "Already a symlink. Stop syncing it first."
-      )
-    if (info && !info.isFile())
-      throw new HttpError(400, "bad_request", `${source.path} is not a file`)
-    const text = await linkText(sourceLocation, target, options.home)
+  const ends = async (): Promise<[End, End]> => [
+    { id: ids.sourceId, probe: await probe(sourcePath) },
+    { id: ids.targetId, probe: await probe(targetPath) },
+  ]
+  const early = checkLink(...(await ends()))
+  if (early) throw early
+  await mkdir(dirname(sourcePath), { recursive: true })
+  const keys = [await fileLocation(sourcePath), await fileLocation(targetPath)]
 
-    if (!info) {
-      // Missing source: create the link in place; EEXIST if a file appeared.
+  return withPathLocks(keys, async () => {
+    // Again under the locks, right before the change.
+    const [source, target] = await ends()
+    const problem = checkLink(source, target)
+    if (problem) throw problem
+    const targetReal = target.probe.real!
+    const text = await linkText(source.probe.location, targetReal, options.home)
+
+    if (source.probe.kind === "missing") {
+      // symlink(2) never replaces: EEXIST if a file appeared meanwhile.
       try {
-        await symlink(text, source.path)
+        await symlink(text, sourcePath)
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "EEXIST")
-          throw new HttpError(409, "exists", "The file appeared on disk")
+          throw new HttpError(409, "exists", `A file appeared at ${sourcePath}. Nothing was changed.`)
         throw err
       }
-      await verifyLink(source.path, target, () => unlink(source.path))
+      await verifyLink(sourcePath, text, targetPath, targetReal, null)
       return { backupPath: null }
     }
 
     if (typeof options.baseHash !== "string")
-      throw new HttpError(
-        400,
-        "bad_request",
-        "baseHash is required when the file exists"
-      )
-    const bytes = await readFile(source.path)
-    const currentHash = contentHash(bytes)
-    if (currentHash !== options.baseHash)
-      throw new HttpError(409, "conflict", "The file changed on disk", {
-        currentHash,
-        currentMtimeMs: info.mtimeMs,
-      })
-    const backupPath = await writeBackup(source.path, bytes, info.mode & 0o777)
-    const temp = join(
-      dir,
-      `.${basename(source.path)}.${crypto.randomUUID().slice(0, 8)}.link`
-    )
+      throw new HttpError(400, "bad_request", "baseHash is required when the file exists")
+
+    // 1. Move the live file out of the way: rename is atomic and keeps the
+    //    bytes that are there at this moment, whatever was read before.
+    const moving = scratchName(sourcePath, "moving")
+    await rename(sourcePath, moving)
+    const moved = await lstat(moving)
+    if (!moved.isFile()) {
+      // Replaced from outside since the probe: put it back if the name is free.
+      if (!(await lstat(sourcePath).catch(() => null)))
+        await rename(moving, sourcePath)
+      throw new HttpError(409, "source_not_file", `${sourcePath} changed on disk. Nothing was changed.`)
+    }
+    // 2. Give it a backup name without replacing an existing backup.
+    let backupPath: string
     try {
-      await symlink(text, temp)
-      await verifyLink(temp, target, async () => {})
-      await rename(temp, source.path)
+      backupPath = await linkAsBackup(moving, sourcePath)
     } catch (err) {
-      await unlink(temp).catch(() => {})
+      await rename(moving, sourcePath).catch(() => {})
       throw err
     }
+    await unlink(moving)
+
+    // 3. The backup is what the user would lose: it must be what they saw.
+    const bytes = await readFile(backupPath)
+    const currentHash = contentHash(bytes)
+    if (currentHash !== options.baseHash) {
+      const restored = await restoreBackup(backupPath, sourcePath)
+      throw new HttpError(
+        409,
+        "conflict",
+        restored
+          ? "The file changed on disk"
+          : `The file changed on disk, and a new file appeared at ${sourcePath}. Your file is kept at ${backupPath}.`,
+        { currentHash, currentMtimeMs: moved.mtimeMs, ...(restored ? {} : { backupPath }) }
+      )
+    }
+
+    // 4. The link goes to the now free name; symlink(2) never replaces.
+    try {
+      await symlink(text, sourcePath)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST")
+        throw new HttpError(
+          409,
+          "exists",
+          `A new file appeared at ${sourcePath} during the sync. It was kept, and your file is at ${backupPath}.`,
+          { backupPath }
+        )
+      await restoreBackup(backupPath, sourcePath).catch(() => false)
+      throw err
+    }
+    await verifyLink(sourcePath, text, targetPath, targetReal, backupPath)
     return { backupPath }
   })
 }
 
-/** The new link must resolve to the target's real path. */
+/**
+ * After the change: the link must resolve to the target, and the target must
+ * still be a regular file. Else undo: remove our link (only if it is still
+ * ours) and put the backup back.
+ */
 async function verifyLink(
   path: string,
-  target: LinkEnd,
-  undo: () => Promise<void>
+  text: string,
+  targetPath: string,
+  targetReal: string,
+  backupPath: string | null
 ): Promise<void> {
-  if ((await realpathOrNull(path)) === target.real) return
-  await undo().catch(() => {})
+  const target = await lstat(targetPath).catch(() => null)
+  const ok =
+    !!target?.isFile() &&
+    (await realpathOrNull(path)) === targetReal &&
+    (await realpathOrNull(targetPath)) === targetReal
+  if (ok) return
+  const ours = await readlink(path).catch(() => null)
+  if (ours === text) await unlink(path).catch(() => {})
+  const restored = backupPath ? await restoreBackup(backupPath, path).catch(() => false) : true
   throw new HttpError(
-    500,
-    "internal",
-    `The link at ${path} does not resolve to ${target.real}`
+    409,
+    "target_changed",
+    restored
+      ? `${targetPath} changed during the sync. Nothing was changed.`
+      : `${targetPath} changed during the sync. Your file is kept at ${backupPath}.`,
+    restored ? undefined : { backupPath }
   )
 }
 
 /**
  * Replaces the symlink at path with a regular file: the target's content now
- * ("copy") or empty. Temp file in the same dir, then rename over the link, so
- * the target itself is never opened for writing.
+ * ("copy") or empty. The target is never opened for writing.
  */
-export async function unlinkFile(
-  path: string,
-  mode: "copy" | "empty"
-): Promise<void> {
-  const key = await location(path)
-  await withPathLock(key, async () => {
-    const info = await lstat(path).catch(() => null)
-    if (!info?.isSymbolicLink())
+export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<void> {
+  const before = await probe(path)
+  if (before.kind !== "link")
+    throw new HttpError(400, "not_a_link", `${path} is not a symlink`)
+  const keys = [before.location]
+  if (before.real) keys.push(await fileLocation(before.real))
+
+  await withPathLocks(keys, async () => {
+    const now = await probe(path)
+    if (now.kind !== "link")
       throw new HttpError(400, "not_a_link", `${path} is not a symlink`)
+    if (now.real !== before.real)
+      throw new HttpError(409, "conflict", `${path} changed on disk. Try again.`)
     let bytes: Uint8Array = new Uint8Array()
     let fileMode = 0o644
     if (mode === "copy") {
-      const real = await realpath(path).catch(() => null)
-      if (!real)
-        throw new HttpError(
-          409,
-          "link_broken",
-          "The link target does not exist, so there is nothing to copy"
-        )
-      const targetInfo = await stat(real)
-      if (!targetInfo.isFile())
-        throw new HttpError(400, "bad_request", `${real} is not a file`)
-      if (targetInfo.size > MAX_TEXT_BYTES)
+      if (!now.real || now.targetKind === "missing")
+        throw new HttpError(409, "link_broken", "The link target does not exist, so there is nothing to copy")
+      if (now.targetKind !== "file")
+        throw new HttpError(400, "target_not_file", `${now.real} is not a regular file`)
+      const info = await stat(now.real)
+      if (info.size > MAX_TEXT_BYTES)
         throw new HttpError(413, "too_large", "File is larger than 1 MB")
-      bytes = await readFile(real)
-      fileMode = targetInfo.mode & 0o777
+      bytes = await readFile(now.real)
+      fileMode = info.mode & 0o777
     }
-    const temp = join(
-      dirname(path),
-      `.${basename(path)}.${crypto.randomUUID().slice(0, 8)}.tmp`
-    )
+    const temp = scratchName(path, "tmp")
+    const moving = scratchName(path, "moving")
     try {
       await writeFile(temp, bytes, { flag: "wx", mode: fileMode })
       await chmod(temp, fileMode)
-      await rename(temp, path)
-    } catch (err) {
+      // Take the link away (atomic), check it is the link we probed, then
+      // put the new file at the free name with link(2), which never replaces.
+      await rename(path, moving)
+      const moved = await lstat(moving)
+      if (!moved.isSymbolicLink()) {
+        await restoreBackup(moving, path).catch(() => false)
+        throw new HttpError(409, "conflict", `${path} changed on disk. Nothing was changed.`)
+      }
+      try {
+        await link(temp, path)
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+          // The old link is only a pointer: nothing is lost by dropping it.
+          await unlink(moving).catch(() => {})
+          throw new HttpError(409, "exists", `A new file appeared at ${path}. It was kept.`)
+        }
+        await rename(moving, path).catch(() => {})
+        throw err
+      }
+      await unlink(moving)
+    } finally {
       await unlink(temp).catch(() => {})
-      throw err
     }
   })
 }

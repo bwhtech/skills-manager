@@ -230,11 +230,19 @@ export interface InstructionLinkRef {
 // GET /api/instructions?scope=<ScopeKey>  -> InstructionFile[]  (scope required)
 // GET /api/instructions/:id               -> FileContent (404 if missing)
 // PUT /api/instructions/:id  SaveRequest & {create?: boolean} -> SaveResponse
-//   Writes to the link target if the file is a symlink.
 //   create: true makes a missing file (and its parent dir). 409 if it already exists.
+//   409 now_linked {linkTarget, linkTargetId?} if the path is a symlink, unless
+//   expectTarget equals its target now: then the save writes to the target.
 
 export interface SaveInstructionRequest extends SaveRequest {
   create?: boolean
+  /**
+   * Only for a save addressed to a symlink: the absolute link target the
+   * client meant to write (InstructionFile.linkTarget). Without it, or when
+   * it no longer matches, the save is refused with 409 now_linked. The UI
+   * always edits the real file's id and never sends it.
+   */
+  expectTarget?: string
 }
 
 // Sync via symlink. A "link" makes the file at :id a symlink to another known
@@ -246,13 +254,18 @@ export interface SaveInstructionRequest extends SaveRequest {
 //   400 if the target is missing or is itself a symlink.
 // POST /api/instructions/:id/link  LinkInstructionRequest -> LinkInstructionResponse
 //   Turns the file at :id (the source) into a symlink to targetId.
-//   Both must be known instruction files. 400 self_link, cycle, target_is_link
-//   (point at the real file instead), target_missing. 409 already_linked if the
-//   source is a symlink. 409 conflict if the source is a regular file whose hash
-//   is not baseHash. The source is copied to <path>.bak (or <path>.bak-<time>
-//   if that exists; a backup is never overwritten), then a temp symlink in the
-//   same dir is renamed over it. A missing source becomes a link, no backup.
-//   The link text is relative when both files are under HOME, else absolute.
+//   Both must be known instruction files; the target a regular file, the source
+//   a regular file or missing. 400 self_link, cycle, target_is_link (point at
+//   the real file instead), target_missing, target_not_file, source_not_file.
+//   409 already_linked if the source is a symlink, hard_linked if it has more
+//   than one hard link. Both paths are locked (sorted) and probed again.
+//   The live source is renamed away and given the name <path>.bak (or
+//   <path>.bak-<time>; a backup is never overwritten), so the backup holds the
+//   bytes on disk at that moment. 409 conflict if they do not hash to baseHash
+//   (the file is put back). Then the symlink is made at the free name; 409
+//   exists (with backupPath) if a file appeared there. 409 target_changed if the
+//   target changed during the sync (undone). A missing source becomes a link,
+//   no backup. The link text is relative when both files are under HOME.
 // POST /api/instructions/:id/unlink  UnlinkInstructionRequest -> UnlinkInstructionResponse
 //   Replaces the symlink at :id with a regular file: a copy of the target's
 //   content now ("copy"), or an empty file ("empty"). Never touches the target.

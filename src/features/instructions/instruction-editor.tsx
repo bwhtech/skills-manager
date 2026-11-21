@@ -3,7 +3,8 @@ import { useQueryClient } from "@tanstack/react-query"
 import type { InstructionFile } from "@shared/api"
 import { DocumentEditor, type SaveOptions } from "@/components/editor"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
-import { api, errorMessage, keys, useInstruction, useScopes } from "@/lib/api"
+import { HttpError, api, errorMessage, keys, useInstruction, useScopes } from "@/lib/api"
+import { tildify } from "@/lib/format"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { alsoReadAs } from "./link-labels"
 
@@ -36,8 +37,13 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
     )
   }
 
-  const save = (text: string, { baseHash, force }: SaveOptions) =>
-    api.saveInstruction(file.id, { content: text, baseHash, force })
+  const save = async (text: string, { baseHash, force }: SaveOptions) => {
+    try {
+      return await api.saveInstruction(file.id, { content: text, baseHash, force })
+    } catch (error) {
+      throw nowLinkedError(error, file, home) ?? error
+    }
+  }
 
   return (
     <Suspense fallback={<EditorSkeleton />}>
@@ -55,5 +61,18 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
         onDirtyChange={onDirtyChange}
       />
     </Suspense>
+  )
+}
+
+/**
+ * The file became a symlink since it was opened (a sync from another tab):
+ * the server refused the save so it cannot land in the linked file. Not a
+ * 409 for the editor, so it shows this message and keeps the draft.
+ */
+function nowLinkedError(error: unknown, file: InstructionFile, home: string | undefined) {
+  if (!(error instanceof HttpError) || error.body.error !== "now_linked") return null
+  const target = typeof error.body.linkTarget === "string" ? tildify(error.body.linkTarget, home) : "another file"
+  return new Error(
+    `${file.fileName} is now synced to ${target}, so this save was refused. Copy your changes, then reload the list and edit ${target}.`
   )
 }

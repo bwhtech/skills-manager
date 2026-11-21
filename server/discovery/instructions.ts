@@ -20,18 +20,21 @@ import { config } from "../config.ts"
 import { HttpError, notFound } from "../lib/errors.ts"
 import {
   contentHash,
+  fileLocation,
   readTextFile,
   realpathOrNull,
   resolveLink,
   saveTextFile,
+  withPathLock,
 } from "../lib/files.ts"
 import { countLineChanges } from "../preview/line-diff.ts"
 import {
   backupPathFor,
   checkLink,
   linkFile,
+  probe,
   unlinkFile,
-  type LinkEnd,
+  type Probe,
 } from "./instruction-links.ts"
 import type { ProjectService } from "./projects.ts"
 
@@ -89,18 +92,58 @@ export class InstructionService {
     return readTextFile(file.linkTarget ?? file.path)
   }
 
-  /** Writes to the link target when the file is a symlink. */
+  /**
+   * Saves the file the client loaded. A save addressed to a path that is a
+   * symlink is refused (409 now_linked) unless expectTarget names the link's
+   * target now: an editor of a file that became a link meanwhile must not
+   * write into the file the link points at. Under the path lock (the key a
+   * link or unlink of this path also takes) the path is checked again.
+   */
   async save(id: string, req: SaveInstructionRequest): Promise<SaveResponse> {
     const file = await this.find(id)
-    const target = file.linkTarget ?? file.path
+    const location = await fileLocation(file.path)
+    const nowLinked = (target: string | null) =>
+      new HttpError(
+        409,
+        "now_linked",
+        `${file.path} is now a symlink${target ? ` to ${target}` : ""}. Your changes were not saved.`,
+        {
+          linkTarget: target,
+          ...(file.linkTargetId ? { linkTargetId: file.linkTargetId } : {}),
+        }
+      )
+
+    if (file.linkTarget) {
+      if (req.expectTarget !== file.linkTarget) throw nowLinked(file.linkTarget)
+      // Still a link to the same file, checked under the target's lock.
+      const guard = async () => {
+        const now = await probe(file.path)
+        if (now.kind !== "link" || (now.real ?? null) !== file.linkTarget)
+          throw nowLinked(now.real)
+      }
+      if (req.create) {
+        if (file.exists)
+          throw new HttpError(409, "exists", "The file already exists")
+        return createFile(file.linkTarget, req.content, guard)
+      }
+      if (!file.exists)
+        throw notFound("File does not exist; send create: true to make it")
+      return saveTextFile(file.linkTarget, req, { guard })
+    }
+
+    // A regular (or missing) file: refuse if it became a link meanwhile.
+    const guard = async () => {
+      const now = await probe(file.path)
+      if (now.kind === "link") throw nowLinked(now.real)
+    }
     if (req.create) {
       if (file.exists)
         throw new HttpError(409, "exists", "The file already exists")
-      return createFile(target, req.content)
+      return createFile(file.path, req.content, guard)
     }
     if (!file.exists)
       throw notFound("File does not exist; send create: true to make it")
-    return saveTextFile(target, req)
+    return saveTextFile(file.path, req, { lockKey: location, guard })
   }
 
   /** What linking other files to the target :id would do. */
@@ -108,8 +151,8 @@ export class InstructionService {
     const all = await this.all()
     const target = all.find((f) => f.id === targetId)
     if (!target) throw notFound("Unknown instruction file")
-    const targetEnd = await this.end(target)
-    const targetContent = await readTarget(target)
+    const targetEnd = { id: target.id, probe: await probe(target.path) }
+    const targetContent = await readTarget(targetEnd.probe)
     const scopes = new Set([target.scope, "user"])
     const candidates = await Promise.all(
       all
@@ -139,8 +182,9 @@ export class InstructionService {
     const target = all.find((f) => f.id === req.targetId)
     if (!source || !target) throw notFound("Unknown instruction file")
     const { backupPath } = await linkFile(
-      await this.end(source),
-      await this.end(target),
+      source.path,
+      target.path,
+      { sourceId: source.id, targetId: target.id },
       { baseHash: req.baseHash, home: this.dirs.home }
     )
     return { file: await this.find(id), backupPath }
@@ -159,7 +203,7 @@ export class InstructionService {
 
   private async candidate(
     file: InstructionFile,
-    target: LinkEnd,
+    target: { id: string; probe: Probe },
     targetContent: FileContent
   ): Promise<SyncCandidate> {
     const base: SyncCandidate = {
@@ -169,7 +213,7 @@ export class InstructionService {
       linesRemoved: 0,
       backupPath: null,
     }
-    const source = await this.end(file)
+    const source = { id: file.id, probe: await probe(file.path) }
     const problem = checkLink(source, target)
     if (problem) return { ...base, blocked: problem.detail }
     if (!file.exists) {
@@ -193,17 +237,6 @@ export class InstructionService {
       hash: content.hash,
       identical: content.hash === targetContent.hash,
       backupPath: await backupPathFor(file.path),
-    }
-  }
-
-  private async end(file: InstructionFile): Promise<LinkEnd> {
-    const link = await resolveLink(file.path)
-    return {
-      id: file.id,
-      path: file.path,
-      isLink: link.isLink,
-      exists: link.exists,
-      real: link.exists ? await realpathOrNull(file.path) : null,
     }
   }
 
@@ -303,31 +336,38 @@ function matchLinks(entries: Entry[]): void {
   }
 }
 
-async function readTarget(target: InstructionFile): Promise<FileContent> {
-  if (target.linkTarget)
+async function readTarget(target: Probe): Promise<FileContent> {
+  if (target.kind === "link")
     throw new HttpError(
       400,
       "target_is_link",
       `${target.path} is a symlink. Sync to the file it points at instead.`
     )
-  if (!target.exists)
+  if (target.kind === "missing")
     throw new HttpError(400, "target_missing", "The target file does not exist")
+  if (target.kind !== "file")
+    throw new HttpError(400, "target_not_file", `${target.path} is not a regular file`)
   return readTextFile(target.path)
 }
 
+/** O_EXCL create, under the lock a link or unlink of the path also takes. */
 async function createFile(
   target: string,
-  content: unknown
+  content: unknown,
+  guard: () => Promise<void>
 ): Promise<SaveResponse> {
   if (typeof content !== "string")
     throw new HttpError(400, "bad_request", "content must be a string")
   await mkdir(dirname(target), { recursive: true })
-  try {
-    await writeFile(target, content, { flag: "wx", mode: 0o644 })
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST")
-      throw new HttpError(409, "exists", "The file already exists")
-    throw err
-  }
-  return { mtimeMs: (await stat(target)).mtimeMs, hash: contentHash(content) }
+  return withPathLock(await fileLocation(target), async () => {
+    await guard()
+    try {
+      await writeFile(target, content, { flag: "wx", mode: 0o644 })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST")
+        throw new HttpError(409, "exists", "The file already exists")
+      throw err
+    }
+    return { mtimeMs: (await stat(target)).mtimeMs, hash: contentHash(content) }
+  })
 }

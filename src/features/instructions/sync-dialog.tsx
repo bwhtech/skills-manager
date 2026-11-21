@@ -1,11 +1,20 @@
-import { useRef, useState } from "react"
+import { useRef, useState, useSyncExternalStore } from "react"
 import { useQueryClient } from "@tanstack/react-query"
 import { toast } from "sonner"
 import type { InstructionFile, SyncCandidate, SyncPreview, UpdateFileChange } from "@shared/api"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Spinner } from "@/components/ui/spinner"
-import { api, errorMessage, invalidateInstructions, useScopes, useSyncPreview } from "@/lib/api"
+import {
+  api,
+  errorMessage,
+  invalidateInstructions,
+  isConflict,
+  keys,
+  useScopes,
+  useSyncPreview,
+} from "@/lib/api"
+import { beginSave, failSave, finishSave, getDraft, isDraftDirty, rebaseDraft, subscribeDrafts } from "@/lib/drafts"
 import { plural, scopeLabel, tildify } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "@/features/updates/file-changes"
@@ -16,6 +25,12 @@ import {
   UpdateDialogHeader,
   UpdateDialogShell,
 } from "@/features/updates/update-dialog-shell"
+import { instructionDraftKey } from "./instruction-editor"
+
+/** The file has edits in an editor (mounted or not) that are not on disk. */
+function hasUnsavedDraft(fileId: string) {
+  return isDraftDirty(getDraft(instructionDraftKey(fileId)))
+}
 
 interface SyncDialogProps {
   /** the regular file the picked files will link to */
@@ -49,6 +64,46 @@ export function SyncDialog({ target, open, onOpenChange }: SyncDialogProps) {
 
   const candidates = preview.data?.candidates ?? []
   const chosen = candidates.filter((c) => !c.blocked && ticked.has(c.file.id))
+  // Linking a file with unsaved edits would swap its editor for the link
+  // view: the edits would vanish without the leave guard. Block until they
+  // are saved (then the preview has the new hash) or discarded.
+  const dirtyIds = useSyncExternalStore(subscribeDrafts, () =>
+    candidates
+      .filter((c) => hasUnsavedDraft(c.file.id))
+      .map((c) => c.file.id)
+      .join("\n")
+  )
+  const dirty = new Set(dirtyIds.split("\n").filter(Boolean))
+  const chosenDirty = chosen.filter((c) => dirty.has(c.file.id))
+  const [savingDraft, setSavingDraft] = useState<string | null>(null)
+
+  const saveDraft = async (file: InstructionFile) => {
+    const key = instructionDraftKey(file.id)
+    const start = beginSave(key)
+    if (!start) return
+    setSavingDraft(file.id)
+    try {
+      const result = await api.saveInstruction(file.id, { content: start.content, baseHash: start.baseHash })
+      finishSave(key, start, result)
+      toast.success(`Saved ${file.fileName}`)
+      void client.invalidateQueries({ queryKey: keys.instruction(file.id) })
+      // The preview compared the old content: compare again before a sync.
+      await preview.refetch()
+    } catch (error) {
+      failSave(key, start, { conflict: isConflict(error) })
+      toast.error(`Could not save ${file.fileName}`, {
+        description: isConflict(error) ? "It changed on disk. Open it to resolve the conflict." : errorMessage(error),
+      })
+    } finally {
+      setSavingDraft(null)
+    }
+  }
+
+  const discardDraft = (file: InstructionFile) => {
+    const key = instructionDraftKey(file.id)
+    const draft = getDraft(key)
+    if (draft && !draft.saving) rebaseDraft(key, draft.base)
+  }
 
   const toggle = (id: string, value: boolean) =>
     setTicked((prev) => {
@@ -63,6 +118,11 @@ export function SyncDialog({ target, open, onOpenChange }: SyncDialogProps) {
     const done: { file: InstructionFile; backupPath: string | null }[] = []
     const failed: { file: InstructionFile; error: unknown }[] = []
     for (const candidate of chosen) {
+      // Again right before sending: an editor may have changed it meanwhile.
+      if (hasUnsavedDraft(candidate.file.id)) {
+        failed.push({ file: candidate.file, error: new Error(`${candidate.file.fileName} has unsaved changes`) })
+        continue
+      }
       try {
         const res = await api.linkInstruction(candidate.file.id, {
           targetId: target.id,
@@ -133,6 +193,15 @@ export function SyncDialog({ target, open, onOpenChange }: SyncDialogProps) {
                   ticked={ticked.has(candidate.file.id)}
                   disabled={running}
                   onTick={(value) => toggle(candidate.file.id, value)}
+                  unsaved={
+                    dirty.has(candidate.file.id) && !candidate.blocked
+                      ? {
+                          saving: savingDraft === candidate.file.id,
+                          onSave: () => void saveDraft(candidate.file),
+                          onDiscard: () => discardDraft(candidate.file),
+                        }
+                      : null
+                  }
                 />
               ))}
             </ul>
@@ -143,7 +212,11 @@ export function SyncDialog({ target, open, onOpenChange }: SyncDialogProps) {
         <Button ref={cancelRef} variant="outline" onClick={() => openChange(false)} disabled={running}>
           Cancel
         </Button>
-        <Button onClick={() => void confirm()} disabled={chosen.length === 0 || running} className={CONFIRM_WRAP}>
+        <Button
+          onClick={() => void confirm()}
+          disabled={chosen.length === 0 || chosenDirty.length > 0 || running || !!savingDraft}
+          className={CONFIRM_WRAP}
+        >
           {running && <Spinner />}
           {chosen.length === 0 ? "Sync files" : `Sync ${plural(chosen.length, "file")}`}
         </Button>
@@ -162,9 +235,12 @@ interface CandidateRowProps {
   ticked: boolean
   disabled: boolean
   onTick: (value: boolean) => void
+  /** set when the file has unsaved edits in an editor */
+  unsaved: { saving: boolean; onSave: () => void; onDiscard: () => void } | null
 }
 
-function CandidateRow({ candidate, preview, target, scopeName, home, ticked, disabled, onTick }: CandidateRowProps) {
+function CandidateRow(props: CandidateRowProps) {
+  const { candidate, preview, target, scopeName, home, ticked, disabled, onTick, unsaved } = props
   const { file, blocked } = candidate
   const changed = candidate.linesAdded + candidate.linesRemoved
   const differs = file.exists && !candidate.identical && !blocked
@@ -231,6 +307,25 @@ function CandidateRow({ candidate, preview, target, scopeName, home, ticked, dis
           )}
         </span>
       </label>
+      {unsaved && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t bg-amber-500/8 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-200"
+        >
+          <span className="min-w-0 flex-1 basis-56">
+            {file.fileName} has unsaved changes — save or discard them first. The diff below is of the file on disk.
+          </span>
+          <span className="flex shrink-0 gap-2">
+            <Button size="sm" variant="outline" className="h-7 pointer-coarse:h-11" onClick={unsaved.onDiscard} disabled={unsaved.saving}>
+              Discard
+            </Button>
+            <Button size="sm" className="h-7 pointer-coarse:h-11" onClick={unsaved.onSave} disabled={unsaved.saving}>
+              {unsaved.saving && <Spinner />}
+              Save
+            </Button>
+          </span>
+        </div>
+      )}
       {differs && <FileChangeList files={[change]} className="rounded-none border-x-0 border-b-0" />}
     </li>
   )

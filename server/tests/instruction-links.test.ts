@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  link as hardLink,
   lstat,
   mkdir,
   mkdtemp,
@@ -16,6 +17,7 @@ import { join } from "node:path"
 import { Hono } from "hono"
 import type {
   InstructionFile,
+  SaveResponse,
   LinkInstructionResponse,
   SyncPreview,
   UnlinkInstructionResponse,
@@ -138,6 +140,21 @@ describe("POST /instructions/:id/link", () => {
     expect(res.body.error).toBe("conflict")
     expect((await lstat(codex())).isFile()).toBe(true)
     expect(await lstat(`${codex()}.bak`).catch(() => null)).toBeNull()
+    // the newer content is back in place, and nothing else is left behind
+    expect(await readFile(codex(), "utf8")).toBe("# edited meanwhile\n")
+    expect(await readdir(join(home, ".codex"))).toEqual(["AGENTS.md"])
+  })
+
+  test("the backup is the live file itself (same inode and mode)", async () => {
+    await writeFile(claude(), "# shared\n")
+    await writeFile(codex(), "# codex\n", { mode: 0o600 })
+    const before = await lstat(codex())
+    const res = await link(codex(), claude(), contentHash("# codex\n"))
+    expect(res.status).toBe(200)
+    const backup = await lstat(res.body.backupPath!)
+    expect(backup.ino).toBe(before.ino)
+    expect(backup.mode & 0o777).toBe(0o600)
+    expect(backup.nlink).toBe(1)
   })
 
   test("400 without baseHash for an existing file", async () => {
@@ -340,5 +357,141 @@ describe("GET /instructions/:id/sync-preview", () => {
     const res = await get<{ error: string }>(`/instructions/${id(codex())}/sync-preview`)
     expect(res.status).toBe(400)
     expect(res.body.error).toBe("target_is_link")
+  })
+})
+
+async function put<T>(fileId: string, body: unknown) {
+  const res = await app.request(`http://localhost/instructions/${fileId}`, {
+    method: "PUT",
+    headers: {
+      host: "localhost",
+      origin: "http://localhost",
+      "X-Skills-Manager": "1",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  })
+  return { status: res.status, body: (await res.json()) as T & { error?: string; linkTargetId?: string } }
+}
+
+describe("concurrency", () => {
+  test("reciprocal syncs started together never make a cycle", async () => {
+    const dir = await makeProject("proj")
+    const a = join(dir, "AGENTS.md")
+    const b = join(dir, "CLAUDE.md")
+    await writeFile(a, "same\n")
+    await writeFile(b, "same\n")
+    const hash = contentHash("same\n")
+    const results = await Promise.all([link(a, b, hash), link(b, a, hash)])
+    expect(results.map((r) => r.status).sort()).toEqual([200, 400])
+    expect(results.find((r) => r.status === 400)!.body.error).toBe("target_is_link")
+    // exactly one link, and both names resolve (no ELOOP)
+    const kinds = await Promise.all([a, b].map(async (p) => (await lstat(p)).isSymbolicLink()))
+    expect(kinds.filter(Boolean)).toHaveLength(1)
+    expect(await readFile(a, "utf8")).toBe("same\n")
+    expect(await readFile(b, "utf8")).toBe("same\n")
+  })
+
+  test("a save racing a sync never lands in the target", async () => {
+    await writeFile(claude(), "same\n")
+    await writeFile(codex(), "same\n")
+    const hash = contentHash("same\n")
+    const [saved, linked] = await Promise.all([
+      put<SaveResponse>(id(codex()), { content: "codex edit\n", baseHash: hash }),
+      link(codex(), claude(), hash),
+    ])
+    expect(await readFile(claude(), "utf8")).toBe("same\n")
+    if (saved.status === 200) {
+      // the save went first: the sync saw a changed file and kept it
+      expect(linked.status).toBe(409)
+      expect(await readFile(codex(), "utf8")).toBe("codex edit\n")
+    } else {
+      expect(saved.body.error).toBe("now_linked")
+      expect(linked.status).toBe(200)
+    }
+  })
+})
+
+describe("saves after a sync (stale editor)", () => {
+  test("409 now_linked for a save addressed to a file that became a link", async () => {
+    await writeFile(claude(), "same\n")
+    await writeFile(codex(), "same\n")
+    const hash = contentHash("same\n")
+    expect((await link(codex(), claude(), hash)).status).toBe(200)
+    // tab 1 still edits ~/.codex/AGENTS.md with the hash it loaded
+    const res = await put(id(codex()), { content: "from a stale tab\n", baseHash: hash })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("now_linked")
+    expect(res.body.linkTargetId).toBe(id(claude()))
+    expect(await readFile(claude(), "utf8")).toBe("same\n")
+    // force does not get around it either
+    expect((await put(id(codex()), { content: "x\n", force: true })).status).toBe(409)
+  })
+
+  test("expectTarget names the link target: then the save writes through", async () => {
+    await writeFile(claude(), "same\n")
+    await symlink("../.claude/CLAUDE.md", codex())
+    const ok = await put(id(codex()), { content: "new\n", baseHash: contentHash("same\n"), expectTarget: claude() })
+    expect(ok.status).toBe(200)
+    expect(await readFile(claude(), "utf8")).toBe("new\n")
+    const wrong = await put(id(codex()), { content: "x\n", baseHash: contentHash("new\n"), expectTarget: join(home, "other.md") })
+    expect(wrong.status).toBe(409)
+    expect(wrong.body.error).toBe("now_linked")
+  })
+
+  test("saving the real file is unaffected", async () => {
+    await writeFile(claude(), "same\n")
+    await symlink("../.claude/CLAUDE.md", codex())
+    const res = await put(id(claude()), { content: "v2\n", baseHash: contentHash("same\n") })
+    expect(res.status).toBe(200)
+    expect(await readFile(codex(), "utf8")).toBe("v2\n")
+  })
+})
+
+describe("file types", () => {
+  test("a directory is never a target, in preview or link", async () => {
+    const dir = await makeProject("proj")
+    await mkdir(join(dir, "CLAUDE.md"))
+    await writeFile(join(dir, "AGENTS.md"), "a\n")
+    const res = await link(join(dir, "AGENTS.md"), join(dir, "CLAUDE.md"), contentHash("a\n"))
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("target_not_file")
+    const preview = await get<{ error: string }>(`/instructions/${id(join(dir, "CLAUDE.md"))}/sync-preview`)
+    expect(preview.status).toBe(400)
+    expect(preview.body.error).toBe("target_not_file")
+    expect((await lstat(join(dir, "AGENTS.md"))).isFile()).toBe(true)
+  })
+
+  test("a directory is never a source", async () => {
+    const dir = await makeProject("proj")
+    await mkdir(join(dir, "CLAUDE.md"))
+    await writeFile(join(dir, "AGENTS.md"), "a\n")
+    const res = await link(join(dir, "CLAUDE.md"), join(dir, "AGENTS.md"))
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe("source_not_file")
+    expect((await lstat(join(dir, "CLAUDE.md"))).isDirectory()).toBe(true)
+  })
+
+  test("a hard-linked source is refused with the reason, also in the preview", async () => {
+    await writeFile(claude(), "a\n")
+    await writeFile(codex(), "b\n")
+    await hardLink(codex(), join(home, "elsewhere-copy.md"))
+    const res = await link(codex(), claude(), contentHash("b\n"))
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe("hard_linked")
+    const preview = await get<SyncPreview>(`/instructions/${id(claude())}/sync-preview`)
+    expect(preview.body.candidates[0].blocked).toMatch(/2 hard links/)
+    expect((await lstat(codex())).isFile()).toBe(true)
+  })
+
+  test("unlink copy refuses a link to a directory; empty still works", async () => {
+    await mkdir(join(home, "somedir"))
+    await symlink("../somedir", codex())
+    const copy = await post(`/instructions/${id(codex())}/unlink`, { mode: "copy" })
+    expect(copy.status).toBe(400)
+    expect(copy.body.error).toBe("target_not_file")
+    expect((await post(`/instructions/${id(codex())}/unlink`, { mode: "empty" })).status).toBe(200)
+    expect((await lstat(codex())).isFile()).toBe(true)
+    expect((await lstat(join(home, "somedir"))).isDirectory()).toBe(true)
   })
 })

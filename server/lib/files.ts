@@ -54,9 +54,17 @@ export async function canonicalPath(path: string): Promise<string> {
  * with the same baseHash cannot both pass, even through different aliases.
  * Writes atomically: a temp file next to the real file, then rename.
  */
+export interface SaveOptions {
+  /** lock (and write) this path instead of canonicalPath(target) */
+  lockKey?: string
+  /** runs under the lock before the hash check; throw to refuse the save */
+  guard?: () => Promise<void>
+}
+
 export async function saveTextFile(
   target: string,
-  req: SaveRequest
+  req: SaveRequest,
+  options: SaveOptions = {}
 ): Promise<SaveResponse> {
   if (typeof req.content !== "string")
     throw badRequest("content must be a string")
@@ -65,8 +73,9 @@ export async function saveTextFile(
   if (!req.force && typeof req.baseHash !== "string")
     throw badRequest("baseHash is required unless force is set")
   const content = req.content
-  const real = await canonicalPath(target)
+  const real = options.lockKey ?? (await canonicalPath(target))
   return withPathLock(real, async () => {
+    await options.guard?.()
     const current = await stat(real)
     if (!req.force) {
       const currentHash = contentHash(await readFile(real))
@@ -98,6 +107,28 @@ export async function withPathLock<T>(
   } finally {
     if (pathLocks.get(path) === tail) pathLocks.delete(path)
   }
+}
+
+/** Runs fn holding the lock of every path, taken in sorted order (no deadlock). */
+export async function withPathLocks<T>(
+  paths: string[],
+  fn: () => Promise<T>
+): Promise<T> {
+  const keys = [...new Set(paths)].sort()
+  const run = (i: number): Promise<T> =>
+    i === keys.length ? fn() : withPathLock(keys[i], () => run(i + 1))
+  return run(0)
+}
+
+/**
+ * Where a path's own directory entry lives: the real parent dir plus the
+ * name. Unlike realpath, it does not follow the entry itself, so it stays the
+ * same lock key when a regular file becomes a symlink. For a regular file it
+ * equals canonicalPath.
+ */
+export async function fileLocation(path: string): Promise<string> {
+  const dir = (await realpathOrNull(dirname(path))) ?? dirname(path)
+  return join(dir, basename(path))
 }
 
 export async function atomicWrite(
