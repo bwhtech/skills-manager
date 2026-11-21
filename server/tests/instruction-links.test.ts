@@ -529,26 +529,25 @@ describe("link failures after the file is moved (review: recovery)", () => {
     expect(await readFile(from, "utf8")).toBe("mine\n")
   })
 
-  test("putBack restores a file and a directory when the name is free", async () => {
+  test("putBack restores a file when the name is free", async () => {
     const { putBack } = await import("../discovery/instruction-links.ts")
     const file = join(home, ".codex/.f.moving")
     await writeFile(file, "f\n")
     expect((await putBack(file, codex())).restored).toBe(true)
     expect(await readFile(codex(), "utf8")).toBe("f\n")
     expect(await lstat(file).catch(() => null)).toBeNull()
+  })
 
+  test("putBack never moves a directory back: it is kept where it is and reported", async () => {
+    const { putBack } = await import("../discovery/instruction-links.ts")
     const dir = join(home, ".codex/.d.moving")
     await mkdir(dir)
     await writeFile(join(dir, "x"), "x")
     const dest = join(home, ".codex/restored-dir")
-    expect((await putBack(dir, dest)).restored).toBe(true)
-    expect(await readFile(join(dest, "x"), "utf8")).toBe("x")
-
-    // A directory that appeared at the destination is never replaced.
-    const dir2 = join(home, ".codex/.d2.moving")
-    await mkdir(dir2)
-    const res = await putBack(dir2, dest)
+    const res = await putBack(dir, dest)
     expect(res.restored).toBe(false)
-    expect(await readFile(join(dest, "x"), "utf8")).toBe("x")
+    if (!res.restored) expect(res.keptAt).toBe(dir)
+    expect(await lstat(dest).catch(() => null)).toBeNull()
+    expect(await readFile(join(dir, "x"), "utf8")).toBe("x")
   })
 })

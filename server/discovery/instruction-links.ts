@@ -15,7 +15,6 @@ import {
   readFile,
   readlink,
   rename,
-  rmdir,
   stat,
   symlink,
   unlink,
@@ -178,8 +177,8 @@ async function linkText(
 
 /**
  * Puts the file at `from` back at `path` without ever replacing what is there, and never
- * throws. A regular file goes back through link(2) (EEXIST if a file appeared); anything
- * else through mkdir + rename onto our own empty dir. When it cannot, `from` is kept.
+ * throws. A regular file or a symlink goes back through link(2) (EEXIST if something
+ * appeared). A directory is never moved back. When it cannot, `from` is kept.
  */
 export async function putBack(
   from: string,
@@ -187,16 +186,9 @@ export async function putBack(
 ): Promise<{ restored: true } | { restored: false; keptAt: string; why: string }> {
   try {
     const st = await lstat(from)
-    if (st.isDirectory()) {
-      await mkdir(path)
-      try {
-        await rename(from, path)
-      } catch (err) {
-        await rmdir(path).catch(() => {})
-        throw err
-      }
-      return { restored: true }
-    }
+    // There is no no-replace rename for directories, and an instruction file is never a
+    // directory: keep it where it is and say so, rather than risk replacing anything.
+    if (st.isDirectory()) return { restored: false, keptAt: from, why: "it is a directory" }
     await link(from, path)
     await unlink(from).catch(() => {})
     return { restored: true }
@@ -204,18 +196,6 @@ export async function putBack(
     const code = (err as NodeJS.ErrnoException).code
     return { restored: false, keptAt: from, why: code === "EEXIST" ? "a new file appeared there" : (err as Error).message }
   }
-}
-
-/** Puts the file at `backup` back at `path`, never over a file that appeared there. */
-async function restoreBackup(backup: string, path: string): Promise<boolean> {
-  try {
-    await link(backup, path)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false
-    throw err
-  }
-  await unlink(backup)
-  return true
 }
 
 export interface LinkIds {
@@ -350,16 +330,29 @@ async function verifyLink(
     (await realpathOrNull(path)) === targetReal &&
     (await realpathOrNull(targetPath)) === targetReal
   if (ok) return
-  const ours = await readlink(path).catch(() => null)
-  if (ours === text) await unlink(path).catch(() => {})
-  const restored = backupPath ? await restoreBackup(backupPath, path).catch(() => false) : true
+  // Take whatever is at path aside first, then look at it: only our own link is deleted.
+  // Anything else that appeared there is put back (no-replace) or kept and reported.
+  const aside = scratchName(path, "undo")
+  let stray: string | null = null
+  if (await rename(path, aside).then(() => true, () => false)) {
+    const entry = await lstat(aside).catch(() => null)
+    const ours = entry?.isSymbolicLink() && (await readlink(aside).catch(() => null)) === text
+    if (ours) await unlink(aside).catch(() => {})
+    else {
+      const back = await putBack(aside, path)
+      if (!back.restored) stray = back.keptAt
+    }
+  }
+  const restored = backupPath ? (await putBack(backupPath, path)).restored : true
+  const notes = [
+    restored ? null : `Your file is kept at ${backupPath}.`,
+    stray ? `Something that appeared at ${path} during the sync is kept at ${stray}.` : null,
+  ].filter(Boolean)
   throw new HttpError(
     409,
     "target_changed",
-    restored
-      ? `${targetPath} changed during the sync. Nothing was changed.`
-      : `${targetPath} changed during the sync. Your file is kept at ${backupPath}.`,
-    restored ? undefined : { backupPath }
+    `${targetPath} changed during the sync. ${notes.length ? notes.join(" ") : "Nothing was changed."}`,
+    { ...(restored ? {} : { backupPath }), ...(stray ? { keptAt: stray } : {}) }
   )
 }
 
@@ -401,8 +394,10 @@ export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<
       // Take the link away (atomic), check it is the link we probed, then
       // put the new file at the free name with link(2), which never replaces.
       await rename(path, moving)
-      const moved = await lstat(moving)
-      if (!moved.isSymbolicLink()) {
+      // Whatever now sits at the scratch name goes back (no-replace) or is reported on
+      // every path below, including when it cannot even be inspected.
+      const moved = await lstat(moving).catch(() => null)
+      if (!moved?.isSymbolicLink()) {
         const back = await putBack(moving, path)
         throw new HttpError(
           409,
@@ -432,7 +427,8 @@ export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<
           back.restored ? undefined : { keptAt: back.keptAt }
         )
       }
-      await unlink(moving)
+      // The old link (checked above) is only a pointer; a leftover scratch name loses nothing.
+      await unlink(moving).catch(() => {})
     } finally {
       await unlink(temp).catch(() => {})
     }
