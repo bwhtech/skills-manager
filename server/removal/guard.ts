@@ -12,10 +12,12 @@ import {
   readScopeLockStrict,
   type LockEntry,
   type LockReader,
+  type StrictLockReader,
 } from "../discovery/locks.ts"
 import { cleanLine } from "../lib/ansi.ts"
 import { HttpError, badRequest } from "../lib/errors.ts"
 import type { UpstreamState } from "../preview/service.ts"
+import { sameIdentity } from "./inventory.ts"
 import {
   invalidNameReason,
   planRemovals,
@@ -46,10 +48,10 @@ export interface RemovalDeps {
   loadCli?: () => Promise<{ agents: AgentTable } & CliNameFns>
   readLock?: LockReader
   /**
-   * reads the lock after `skills remove`; throws on a missing, unreadable or malformed file
-   * (default readScopeLockStrict; with only readLock set, readLock)
+   * reads the lock after `skills remove`; throws on a missing, unreadable or malformed file,
+   * and lists every raw key (default readScopeLockStrict; with only readLock set, readLock)
    */
-  readLockStrict?: LockReader
+  readLockStrict?: StrictLockReader
   records: DeletionRecords
   /** a fresh upstream lookup by the CLI's rules (UpdatePreviewService.upstreamState) */
   upstream: (scope: ScopeKey, name: string, entry: LockEntry) => Promise<UpstreamState>
@@ -98,7 +100,7 @@ export class RemovalGuard {
   /** the home the plans resolve user-scope paths in */
   readonly home: string
   private readonly readLock: LockReader
-  private readonly readLockStrict: LockReader
+  private readonly readLockStrict: StrictLockReader
 
   constructor(private readonly deps: RemovalDeps) {
     this.home = deps.home ?? config.home
@@ -141,6 +143,7 @@ export class RemovalGuard {
           intent: "cleanup" as const,
           copies: [],
           deleteCopies: [],
+          identities: {},
           fingerprint: "",
           candidates: [],
         }))
@@ -279,24 +282,35 @@ export class RemovalGuard {
   }
 
   /**
-   * Right before a group's `skills remove` call (after its ticked copies are deleted): plan
-   * each name again and compare with the confirmed plan. The lock entry must be unchanged, and
-   * so must the -a list, willDelete and every path the CLI could look at (all agents' cleanup
-   * paths, eve subagent dirs, the canonical folder). Returns, per name, a snapshot of those
-   * paths for verify.
+   * Right before a group's `skills remove` call: plan each name again and compare with the
+   * confirmed plan. The lock entry must be unchanged, and so must the -a list, willDelete and
+   * every path the CLI could look at (all agents' cleanup paths, eve subagent dirs, the
+   * canonical folder), and every promoted copy must still have the identity the plan checked.
+   * Returns, per name, a snapshot of those paths for verify.
+   *
+   * Two phases. "present" (before the ticked copies are staged): planned with them as gone,
+   * and each one must still be a copy of the name with the identity the plan recorded.
+   * "staged" (default, after staging): planned from the disk as it is; none of the ticked
+   * copies may be at its path.
    *
    * The CLI works out its paths again when it runs, so a folder made by the same user between
    * this snapshot and the CLI's own scan can still be deleted without notice. That race is
    * accepted: the snapshot shrinks it to the time it takes to start the CLI, and verify then
    * fails the job for any snapshotted path that went missing.
    */
-  async recheck(scope: ScopeKey, plans: PlannedRemoval[]): Promise<Rechecked> {
+  async recheck(
+    scope: ScopeKey,
+    plans: PlannedRemoval[],
+    options: { copies?: "present" | "staged" } = {}
+  ): Promise<Rechecked> {
+    const present = options.copies === "present"
     const lock = await this.readLock(scope).catch(() => null)
     const snapshot = new Map<string, string[]>()
     const byIntent = new Map<RemovalIntent, PlannedRemoval[]>()
     for (const plan of plans) byIntent.set(plan.intent, [...(byIntent.get(plan.intent) ?? []), plan])
     for (const [intent, group] of byIntent) {
-      const fresh = await this.plans(scope, group.map((p) => p.name), { intent })
+      const gone = present ? new Map(group.map((p) => [p.name, p.deleteCopies])) : undefined
+      const fresh = await this.plans(scope, group.map((p) => p.name), { intent, ...(gone ? { gone } : {}) })
       for (const [i, plan] of group.entries()) {
         const now = fresh[i]
         const entry = lock?.skills.get(plan.name)
@@ -309,8 +323,18 @@ export class RemovalGuard {
         if (changed) return { ok: false, reason: `${plan.name}: what would be deleted changed (${changed})` }
         const moved = setDiff(plan.candidates.map(candidateKey), now.candidates.map(candidateKey))
         if (moved) return { ok: false, reason: `${plan.name}: the paths skills remove could touch changed (${moved})` }
-        const left = plan.deleteCopies.filter((path) => now.copies.some((c) => c.path === path))
-        if (left.length) return { ok: false, reason: `${plan.name}: ticked copies are still there: ${left.join(", ")}` }
+        for (const p of plan.promoted ?? [])
+          if (!sameIdentity(plan.identities[p.path], now.identities[p.path]))
+            return { ok: false, reason: `${plan.name}: ${p.path} changed since it was checked` }
+        if (present) {
+          const off = plan.deleteCopies.filter(
+            (path) => !now.copies.some((c) => c.path === path) || !sameIdentity(plan.identities[path], now.identities[path])
+          )
+          if (off.length) return { ok: false, reason: `${plan.name}: ticked copies changed since they were checked: ${off.join(", ")}` }
+        } else {
+          const left = plan.deleteCopies.filter((path) => now.copies.some((c) => c.path === path))
+          if (left.length) return { ok: false, reason: `${plan.name}: ticked copies are still there: ${left.join(", ")}` }
+        }
         snapshot.set(plan.name, now.candidates.map((c) => c.path))
       }
     }
@@ -331,7 +355,7 @@ export class RemovalGuard {
   ): Promise<Verified> {
     const lines = output.split("\n").map((line) => cleanLine(line).trim())
     const warnings = lines.filter((line) => INCOMPLETE.some((re) => re.test(line)))
-    let lock: Awaited<ReturnType<LockReader>> | null = null
+    let lock: Awaited<ReturnType<StrictLockReader>> | null = null
     let lockError: string | null = null
     try {
       lock = await this.readLockStrict(scope)
@@ -339,6 +363,7 @@ export class RemovalGuard {
       lockError = (err as Error).message
     }
     const exists = async (path: string) => !!(await lstat(path).catch(() => null))
+    const cli = await this.cli()
     const removed: string[] = []
     const incomplete: Verified["incomplete"] = []
     for (const plan of plans) {
@@ -357,7 +382,15 @@ export class RemovalGuard {
         if (!allowed.has(path) && !(await exists(path)))
           problems.push(`deleted although it was not to be: ${path}`)
       if (lockError) problems.push(lockError)
-      else if (lock?.skills.has(plan.name)) problems.push("still in the lock file")
+      else if (lock) {
+        const left = stillLocked(lock, plan.name, cli.sanitizeName)
+        if (left.length)
+          problems.push(
+            left.length === 1 && left[0] === plan.name && lock.skills.has(plan.name)
+              ? "still in the lock file"
+              : `still in the lock file: ${left.map((key) => `"${key}"${lock?.skills.has(key) ? "" : " (malformed entry)"}`).join(", ")}`
+          )
+      }
       if (problems.length) incomplete.push({ name: plan.name, problems })
       else removed.push(plan.name)
     }
@@ -431,6 +464,22 @@ export function logCopies(plan: PlannedRemoval, log: (line: string) => void): vo
   for (const k of plan.kept) log(`  kept: ${k.reason} at ${k.path}`)
 }
 
+/**
+ * Raw lock keys that still stand for `name` after `skills remove`, by the CLI's own key
+ * matching: the exact key it deletes (removeSkillFromLock), and any key that resolves to the
+ * same folder name (resolveSkillsToRemove indexes keys by sanitizeName). Malformed entries
+ * count: a key is present whatever its entry holds.
+ */
+export function stillLocked(
+  lock: { skills: ReadonlyMap<string, unknown>; rawKeys?: string[] },
+  name: string,
+  sanitizeName: (name: string) => string
+): string[] {
+  const keys = lock.rawKeys ?? [...lock.skills.keys()]
+  const sanitized = sanitizeName(name)
+  return keys.filter((key) => key === name || sanitizeName(key) === sanitized)
+}
+
 function tickedOf(shown: ShownPlans): Map<string, string[]> {
   return new Map([...shown].map(([name, plan]) => [name, plan.copies ?? []]))
 }
@@ -458,6 +507,7 @@ export function toPublic(plan: PlannedRemoval): RemovalPlan {
     copies: plan.copies,
     ...(plan.blocked ? { blocked: plan.blocked } : {}),
     ...(plan.blockedUnlessCopies ? { blockedUnlessCopies: true } : {}),
+    ...(plan.promoted?.length ? { promoted: plan.promoted } : {}),
   }
 }
 

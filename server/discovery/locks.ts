@@ -35,6 +35,16 @@ export interface SkillLock {
 /** The lock of a scope: the global lock for "user", else the project's skills-lock.json. */
 export type LockReader = (scope: string) => Promise<SkillLock>
 
+/**
+ * A lock read for verification: also every key of the raw `skills` object, whatever its entry
+ * holds. `skills` drops entries without a string `source`; `rawKeys` does not.
+ */
+export interface StrictLock extends SkillLock {
+  rawKeys: string[]
+}
+
+export type StrictLockReader = (scope: string) => Promise<SkillLock & { rawKeys?: string[] }>
+
 export const readScopeLock: LockReader = (scope) =>
   scope === "user" ? readGlobalLock() : readProjectLock(scope)
 
@@ -98,9 +108,10 @@ export async function readLock(path: string): Promise<SkillLock> {
 /**
  * For verification after `skills remove`, which always writes the lock back: throws when the
  * file is missing, unreadable, not JSON, or has no `skills` object. A valid lock with no
- * entries is a valid empty result.
+ * entries is a valid empty result. `rawKeys` lists every own key of `skills`, malformed
+ * entries included, so that verification never reads a malformed entry as "removed".
  */
-export async function readLockStrict(path: string): Promise<SkillLock> {
+export async function readLockStrict(path: string): Promise<StrictLock> {
   let text: string
   try {
     text = await readFile(path, "utf8")
@@ -118,11 +129,11 @@ export async function readLockStrict(path: string): Promise<SkillLock> {
   const skills = (raw as RawLock | null)?.skills
   if (!raw || typeof raw !== "object" || !skills || typeof skills !== "object" || Array.isArray(skills))
     throw new Error(`the lock file ${path} has no skills object`)
-  return parseLock(raw as RawLock)
+  return { ...parseLock(raw as RawLock), rawKeys: Object.keys(skills) }
 }
 
 /** readLockStrict for a scope: the global lock for "user", else the project's lock. */
-export const readScopeLockStrict: LockReader = (scope) =>
+export const readScopeLockStrict: (scope: string) => Promise<StrictLock> = (scope) =>
   readLockStrict(scope === "user" ? config.globalLock : join(scope, projectLockName))
 
 function parseLock(raw: RawLock): SkillLock {

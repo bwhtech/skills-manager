@@ -302,6 +302,12 @@ export interface RemovalPlan {
    * request ticks all of them; willDelete then says what `skills remove` deletes.
    */
   blockedUnlessCopies?: boolean
+  /**
+   * Explicit Remove only: real-folder copies in willDelete that count as part of the install,
+   * with the evidence (an inventory-identical canonical folder or installMode "copy", and the
+   * lock's recorded hash matching by the CLI's own algorithm). Any other copy is in `copies`.
+   */
+  promoted?: { path: string; reason: string }[]
 }
 
 /** One independent same-named copy of a skill, in an agent skills dir. */
@@ -311,19 +317,26 @@ export interface RemovalCopy {
   /** the label(s) of the agent(s) whose skills dir holds it, e.g. "Claude Code" */
   agent: string
   /**
-   * Same files and bytes as the canonical folder (compared like the update preview compares
-   * folders, with the same limits). False when anything differs, when there is no canonical
-   * folder, or when the folders are too large to compare.
+   * Same deletion inventory as the canonical folder: every entry walked without following
+   * links, with the same kind, permission bits, size, bytes and link text, and nothing a copy
+   * made by the skills CLI never holds (.git, __pycache__, metadata.json, links that leave the
+   * folder or lead nowhere, special files). False when anything differs, when there is no
+   * canonical folder, or when the folders are too large to compare (the preview's limits).
    */
   identical: boolean
-  /** files that differ (added, removed or changed), when known */
+  /** entries that differ (added, removed or changed), when known */
   differences?: number
   /** files in the copy (at most the preview limit, see tooLarge) */
   files: number
   /** too many files or bytes to compare: not identical */
   tooLarge?: boolean
-  /** short reason when not identical, e.g. "3 files differ" or "no canonical folder to compare with" */
+  /** short reason when not identical: `reasons` joined with "; " */
   reason?: string
+  /**
+   * every reason when not identical, e.g. "has .git history (.git)", "has a link outside the
+   * folder (docs -> /srv/docs)", "1 file changed (SKILL.md)", "no canonical folder to compare with"
+   */
+  reasons?: string[]
   /** the skills CLI keeps the canonical folder and the lock entry while this copy exists */
   blocking: boolean
 }

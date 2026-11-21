@@ -4,10 +4,10 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { Hono } from "hono"
 import type { ScopeKey } from "../../shared/api.ts"
-import { SkillActions } from "../actions.ts"
+import { SkillActions, type ActionHooks } from "../actions.ts"
 import type { SkillsCli } from "../cli/skills-cli.ts"
 import { config } from "../config.ts"
-import { readLock, readLockStrict, type LockEntry, type LockReader } from "../discovery/locks.ts"
+import { readLock, readLockStrict, type LockEntry, type LockReader, type StrictLockReader } from "../discovery/locks.ts"
 import type { ProjectService } from "../discovery/projects.ts"
 import { cleanLine } from "../lib/ansi.ts"
 import { handleError } from "../lib/errors.ts"
@@ -27,7 +27,7 @@ export interface Fixture {
   home: string
   lockPath: string
   readLock: LockReader
-  readLockStrict: LockReader
+  readLockStrict: StrictLockReader
   skill(dir: string, name: string): Promise<string>
   link(path: string, target: string): Promise<void>
   writeLock(entries: Record<string, Partial<LockEntry>>): Promise<void>
@@ -180,6 +180,8 @@ export interface Wired {
   jobs: JobManager
   actions: SkillActions
   guard: RemovalGuard
+  /** the hooks the actions were built with; tests may set `stage` */
+  hooks: ActionHooks
   calls: string[][]
   /** onAsk runs inside the job's fresh upstream recheck (to change the disk mid-job) */
   upstream: { state: UpstreamState | Error; asked: string[]; onAsk?: () => Promise<void> | void }
@@ -211,19 +213,14 @@ export async function wire(
     },
   })
   const jobs = new JobManager(() => {})
-  const actions = new SkillActions(
-    cli,
-    jobs,
-    {
-      afterUpdate: (scope, names, outcome, output) => {
-        void updates.noteJobOutput(scope, output)
-        if (outcome.ok) updates.markUpdated(scope, names, outcome.failed)
-      },
-      afterRemove: (scope, removed) => updates.markRemoved(scope, removed),
+  const hooks: ActionHooks = {
+    afterUpdate: (scope, names, outcome, output) => {
+      void updates.noteJobOutput(scope, output)
+      if (outcome.ok) updates.markUpdated(scope, names, outcome.failed)
     },
-    guard,
-    fx.readLock
-  )
+    afterRemove: (scope, removed) => updates.markRemoved(scope, removed),
+  }
+  const actions = new SkillActions(cli, jobs, hooks, guard, fx.readLock)
   updates.start()
   while (updates.get().checking) await Bun.sleep(1)
   const app = new Hono()
@@ -237,6 +234,7 @@ export async function wire(
     jobs,
     actions,
     guard,
+    hooks,
     calls,
     upstream,
     run: async (body) =>

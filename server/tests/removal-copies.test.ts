@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import type { RemovalPlan } from "../../shared/api.ts"
 import { readLock, readLockStrict } from "../discovery/locks.ts"
@@ -10,6 +10,7 @@ import { deletedCheck, makeFixture, settle, shownPlans, wire, type Fixture } fro
 
 const exists = async (path: string) => !!(await lstat(path).catch(() => null))
 const lockKeys = async (fx: Fixture) => [...(await readLock(fx.lockPath)).skills.keys()]
+const trashDirs = async (dir: string) => (await readdir(dir)).filter((n) => n.startsWith(".skills-manager-trash-"))
 
 /**
  * Lock: gone (deleted upstream) and keep. gone has a canonical folder, a Claude Code copy
@@ -59,14 +60,15 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
         identical: false,
         files: 2,
         differences: 1,
-        reason: "1 file differs",
+        reason: "1 file only in the copy (notes.md)",
+        reasons: ["1 file only in the copy (notes.md)"],
         blocking: false,
       },
     ])
     // Same file names, other bytes: differs too.
     await writeFile(join(claude, "SKILL.md"), "---\nname: gone\ndescription: edited\n---\n")
     const edited = await planOf(w)
-    expect(edited.copies?.[0]).toMatchObject({ identical: false, differences: 1, reason: "1 file differs" })
+    expect(edited.copies?.[0]).toMatchObject({ identical: false, differences: 1, reason: "1 file changed (SKILL.md)" })
   })
 
   test("a copy over the preview limits is too large to compare, so not identical", async () => {
@@ -99,7 +101,7 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
     for (const path of [canonical, claude, link]) expect(await exists(path)).toBe(true)
   })
 
-  test("a ticked copy is deleted first; then the canonical folder, links and lock entry go; others stay", async () => {
+  test("a ticked copy is staged, skills remove runs and verifies, then the copy is deleted; others stay", async () => {
     const { fx, canonical, claude, link, other } = await withCopies()
     const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
     const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
@@ -111,15 +113,18 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
     expect(await exists(other)).toBe(true) // not ticked
     expect(await lockKeys(fx)).toEqual(["keep"])
     expect(await exists(join(fx.home, ".agents/skills/keep"))).toBe(true)
-    expect(job.log).toContain(`Deleted ${claude}`)
+    expect(job.log).toContain(`Deleted the separate copy ${claude}`)
     expect(job.log).toContain(`Deleted separate copies: ${claude}`)
     expect(job.log).toContain(`  kept: separate copy (not ticked) at ${other}`)
     const cliCall = w.calls.findIndex((c) => c[0] === "remove")
     expect(cliCall).toBeGreaterThanOrEqual(0)
-    // The first "$ skills remove" line is the job's command; the last is the CLI step.
-    expect(job.log.findIndex((l) => l === `Deleted ${claude}`)).toBeLessThan(
-      job.log.findLastIndex((l) => l.startsWith("$ skills remove"))
-    )
+    // Staged before the CLI step (the last "$ skills remove" line), deleted only after it.
+    const staged = job.log.findIndex((l) => l.startsWith(`Staged the separate copy ${claude} in `))
+    const cli = job.log.findLastIndex((l) => l.startsWith("$ skills remove"))
+    expect(staged).toBeGreaterThanOrEqual(0)
+    expect(staged).toBeLessThan(cli)
+    expect(job.log.findIndex((l) => l === `Deleted the separate copy ${claude}`)).toBeGreaterThan(cli)
+    expect(await trashDirs(join(fx.home, ".claude/skills"))).toEqual([])
     expect(w.updates.isDeleted("user", "gone")).toBe(false)
   })
 
@@ -131,7 +136,7 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
     const err = await errorOf(await w.run({ scope: "user", remove: ["gone"], removePlans }))
     expect(err.status).toBe(409)
     expect(err.error).toBe("removal_plan_changed")
-    expect(err.detail).toContain(`${claude} is now different (1 file differs)`)
+    expect(err.detail).toContain(`${claude} is now different (1 file only in the copy (extra.md))`)
     await rm(join(claude, "extra.md"))
 
     // Accepted, then the copy changes during the fresh upstream recheck in the job.
@@ -144,7 +149,7 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
     expect(await exists(canonical)).toBe(true)
   })
 
-  test("a copy delete that fails stops before skills remove and logs what was deleted", async () => {
+  test("a copy that cannot be staged: the copies staged before it are restored, skills remove does not run", async () => {
     const { fx, canonical, claude, other } = await withCopies()
     const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
     const removePlans = await shownPlans(w, ["gone"], { gone: [claude, other] })
@@ -153,15 +158,15 @@ describe("separate copies of deleted-upstream skills (real skills CLI, fixture H
     try {
       const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
       expect(job.status).toBe("error")
-      expect(job.log).toContain(`Deleted ${claude}`)
-      expect(job.log).toContain(
-        `Stopped before skills remove: the separate copy ${other} could not be deleted. Nothing else was removed.`
-      )
-      expect(job.log).toContain(`  deleted: ${claude}`)
-      expect(job.log).toContain(`  not deleted: ${other}`)
+      expect(job.log.some((l) => l.startsWith(`Staged the separate copy ${claude} in `))).toBe(true)
+      expect(job.log.some((l) => l.startsWith(`Refused to stage the separate copy ${other}: could not move it into a trash dir`))).toBe(true)
+      expect(job.log).toContain(`Skipped gone: the separate copy ${other} could not be staged, so skills remove did not run.`)
+      expect(job.log).toContain(`Restored the separate copy ${claude}`)
+      expect(job.log).toContain(`Restored separate copies: ${claude}`)
       expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
-      expect(await exists(other)).toBe(true)
-      expect(await exists(canonical)).toBe(true)
+      for (const path of [claude, other, canonical]) expect(await exists(path)).toBe(true)
+      expect(await readFile(join(claude, "SKILL.md"), "utf8")).toContain("name: \"gone\"")
+      expect(await trashDirs(join(fx.home, ".claude/skills"))).toEqual([])
       expect(await lockKeys(fx)).toEqual(["gone", "keep"])
       expect(w.updates.isDeleted("user", "gone")).toBe(true)
     } finally {
@@ -197,16 +202,19 @@ describe("re-check before each skills remove call (review round 7, item 2)", () 
     const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
     const fresh = join(fx.home, ".bob/skills/gone") // an agent path the CLI could look at
     const recheck = w.guard.recheck.bind(w.guard)
-    w.guard.recheck = async (scope, plans) => {
+    w.guard.recheck = async (scope, plans, options) => {
       await fx.skill(".bob/skills", "gone")
-      return recheck(scope, plans)
+      return recheck(scope, plans, options)
     }
     const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
     expect(job.status).toBe("error")
+    // The re-check before staging finds the new folder among the paths the CLI could touch.
     const line = job.log.find((l) => l.startsWith("Skipped gone (removal_plan_changed)"))
     expect(line).toContain(`+${fresh} (copy)`)
     expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
     expect(await exists(fresh)).toBe(true)
+    expect(await exists(claude)).toBe(true) // the ticked copy was never touched
+    expect(job.log.some((l) => l.startsWith("Staged"))).toBe(false)
     expect(await exists(canonical)).toBe(true)
     expect(await lockKeys(fx)).toEqual(["gone", "keep"])
   })
@@ -216,9 +224,9 @@ describe("re-check before each skills remove call (review round 7, item 2)", () 
     const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
     const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
     const recheck = w.guard.recheck.bind(w.guard)
-    w.guard.recheck = async (scope, plans) => {
+    w.guard.recheck = async (scope, plans, options) => {
       await fx.writeLock({ gone: { skillFolderHash: "reinstalled" }, keep: {} })
-      return recheck(scope, plans)
+      return recheck(scope, plans, options)
     }
     const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
     expect(job.log).toContain(
@@ -226,6 +234,10 @@ describe("re-check before each skills remove call (review round 7, item 2)", () 
     )
     expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
     expect(await exists(canonical)).toBe(true)
+    // The re-check runs before any copy is staged: the selected copy is untouched.
+    expect(await exists(claude)).toBe(true)
+    expect(job.log.some((l) => l.startsWith("Staged"))).toBe(false)
+    expect(await trashDirs(join(fx.home, ".claude/skills"))).toEqual([])
   })
 
   test("(b) a snapshotted path that is gone after skills remove fails the job", async () => {
@@ -250,18 +262,32 @@ describe("explicit Remove of a copy-mode install (review round 7, item 3)", () =
   const skillStub = (name: string) =>
     ({ origin: "npx", scope: "user", cliName: name, name, placements: [] }) as unknown as IndexedSkill
 
-  test("a copy that matches the canonical folder is part of the install: Remove deletes both and the lock entry", async () => {
+  test("a copy inventory-identical to the canonical folder, with the lock hash matching, is part of the install", async () => {
     const fx = await makeFixture()
-    await fx.writeLock({ foo: {}, keep: {} })
     const canonical = await fx.skill(".agents/skills", "foo")
     await writeFile(join(canonical, "ref.md"), "reference\n")
     const copy = await fx.skill(".claude/skills", "foo") // `skills add --copy`: a real folder
     await writeFile(join(copy, "ref.md"), "reference\n")
+    // No provenance (the harness's skillFolderHash "abc" is no hash): identical, but opt-in.
+    await fx.writeLock({ foo: {}, keep: {} })
     const w = await wire(fx, {})
+    const [unproven] = await w.guard.plans("user", ["foo"], { intent: "remove" })
+    expect(unproven.blockedUnlessCopies).toBe(true)
+    expect(unproven.copies.map((c) => [c.path, c.identical])).toEqual([[copy, true]])
+    expect(unproven.promoted).toBeUndefined()
+
+    const cli = await fx.loadCli()
+    await fx.writeLock({ foo: { skillFolderHash: await cli.computeSkillFolderHash!(copy) }, keep: {} })
     const [plan] = await w.guard.plans("user", ["foo"], { intent: "remove" })
     expect(plan.blocked).toBeUndefined()
     expect(plan.willDelete).toEqual([copy, canonical].sort())
     expect(plan.copies).toEqual([])
+    expect(plan.promoted).toEqual([
+      {
+        path: copy,
+        reason: "copy the skills CLI installed: same files, links and permissions as the canonical folder, and its CLI folder hash matches the lock",
+      },
+    ])
     // A deleted-upstream cleanup still treats it as an opt-in copy.
     const [cleanup] = await w.guard.plans("user", ["foo"])
     expect(cleanup.blockedUnlessCopies).toBe(true)
@@ -336,8 +362,16 @@ describe("explicit Remove of a copy-mode install (review round 7, item 3)", () =
     await writeFile(join(copy, "SKILL.md"), "---\nname: foo\ndescription: test\n---\n")
     const cli = await fx.loadCli()
     const computedHash = await cli.computeSkillFolderHash!(copy)
-    const lock = { lastSelectedAgents: [], skills: new Map([["foo", { source: "owner/repo", computedHash }]]) }
-    const env = { scope: project, home: fx.home, agents: cli.agents, cli, lock }
+    const lockOf = (installMode?: string) => ({
+      lastSelectedAgents: [],
+      skills: new Map([["foo", { source: "owner/repo", computedHash, ...(installMode ? { installMode } : {}) }]]),
+    })
+    // Without a canonical folder and without installMode "copy", a hash match is not enough.
+    const bare = { scope: project, home: fx.home, agents: cli.agents, cli, lock: lockOf() }
+    const [unproven] = await planRemovals({ ...bare, intent: "remove" }, ["foo"])
+    expect(unproven.willDelete).toEqual([])
+    expect(unproven.copies.map((c) => c.path)).toEqual([copy])
+    const env = { ...bare, lock: lockOf("copy") }
     const [match] = await planRemovals({ ...env, intent: "remove" }, ["foo"])
     expect(match.willDelete).toEqual([copy])
     await writeFile(join(copy, "SKILL.md"), "---\nname: foo\ndescription: edited\n---\n")
@@ -374,5 +408,141 @@ describe("strict lock reads after removal (review round 7, item 4)", () => {
     await writeFile(fx.lockPath, JSON.stringify({ version: 3, skills: {} }))
     expect((await w.guard.verify("user", [plan], "", 0)).removed).toEqual(["gone"])
     expect(await readFile(fx.lockPath, "utf8")).toContain("skills")
+  })
+})
+
+describe("ticked copies are staged, not deleted, until their group verifies (review round 8, item 3)", () => {
+  test("a re-check that fails after staging restores the copies", async () => {
+    const { fx, canonical, claude } = await withCopies()
+    const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
+    const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
+    const recheck = w.guard.recheck.bind(w.guard)
+    w.guard.recheck = async (scope, plans, options) => {
+      if (options?.copies !== "present") await fx.writeLock({ gone: { skillFolderHash: "reinstalled" }, keep: {} })
+      return recheck(scope, plans, options)
+    }
+    const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
+    expect(job.status).toBe("error")
+    const staged = job.log.findIndex((l) => l.startsWith(`Staged the separate copy ${claude} in `))
+    const skipped = job.log.indexOf("Skipped gone (removal_plan_changed): the lock entry of gone changed. Open the dialog again.")
+    const restored = job.log.indexOf(`Restored the separate copy ${claude}`)
+    expect(staged).toBeGreaterThanOrEqual(0)
+    expect(skipped).toBeGreaterThan(staged)
+    expect(restored).toBeGreaterThan(skipped)
+    expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
+    expect(await readFile(join(claude, "SKILL.md"), "utf8")).toContain("name: \"gone\"")
+    expect(await exists(canonical)).toBe(true)
+    expect(await trashDirs(join(fx.home, ".claude/skills"))).toEqual([])
+  })
+
+  test("an error after staging restores the copies too", async () => {
+    const { fx, claude } = await withCopies()
+    const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
+    const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
+    const recheck = w.guard.recheck.bind(w.guard)
+    w.guard.recheck = async (scope, plans, options) => {
+      if (options?.copies !== "present") throw new Error("disk on fire")
+      return recheck(scope, plans, options)
+    }
+    const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
+    expect(job.status).toBe("error")
+    expect(job.log).toContain("Stopped gone: disk on fire")
+    expect(job.log).toContain(`Restored the separate copy ${claude}`)
+    expect(await exists(join(claude, "SKILL.md"))).toBe(true)
+    expect(await trashDirs(join(fx.home, ".claude/skills"))).toEqual([])
+  })
+
+  test("a skills remove that does not verify restores the copies", async () => {
+    const { fx, claude, link } = await withCopies()
+    const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
+    const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
+    const dir = join(fx.home, ".augment/skills")
+    await chmod(dir, 0o555) // the link cannot be unlinked: "Could not remove skill from Augment"
+    try {
+      const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
+      expect(job.status).toBe("error")
+      expect(w.calls.some((c) => c[0] === "remove")).toBe(true)
+      expect(job.log.find((l) => l.startsWith("Incomplete removal of gone:"))).toContain(`still on disk: ${link}`)
+      expect(job.log).toContain(`Moving back the separate copies of what did not verify: ${claude}`)
+      expect(job.log).toContain(`Restored the separate copy ${claude}`)
+      expect(job.log.some((l) => l.startsWith("Deleted the separate copy"))).toBe(false)
+      expect(await exists(join(claude, "SKILL.md"))).toBe(true)
+      expect(await trashDirs(join(fx.home, ".claude/skills"))).toEqual([])
+    } finally {
+      await chmod(dir, 0o755)
+    }
+  })
+})
+
+describe("a ticked copy is deleted only while it is the folder the plan checked (review round 8, item 2)", () => {
+  /** Puts an unrelated folder (no SKILL.md) at `path`; the original copy goes to `path`.saved. */
+  const swap = async (path: string) => {
+    await rename(path, `${path}.saved`)
+    await mkdir(path)
+    await writeFile(join(path, "precious.txt"), "not a skill\n")
+  }
+
+  for (const when of ["beforeCheck", "afterCheck"] as const)
+    test(`a later copy swapped for an unrelated folder (${when === "beforeCheck" ? "before its checks" : "between its checks and the move"}): moved back, the group aborts`, async () => {
+      const { fx, canonical, claude, other } = await withCopies()
+      const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
+      const removePlans = await shownPlans(w, ["gone"], { gone: [claude, other] })
+      w.hooks.stage = { [when]: (path: string) => (path === other ? swap(other) : undefined) }
+      const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
+      expect(job.status).toBe("error")
+      expect(job.log.some((l) => l.startsWith(`Staged the separate copy ${claude} in `))).toBe(true)
+      const refusal =
+        when === "beforeCheck"
+          ? `Refused to stage the separate copy ${other}: it is not the folder that was checked (it was moved or replaced).`
+          : `Refused to stage the separate copy ${other}: what was moved is not the folder that was checked.`
+      expect(job.log).toContain(refusal)
+      expect(job.log).toContain(`Restored the separate copy ${claude}`)
+      expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
+      expect(await readFile(join(other, "precious.txt"), "utf8")).toBe("not a skill\n")
+      expect(await exists(join(`${other}.saved`, "notes.md"))).toBe(true)
+      expect(await exists(join(claude, "SKILL.md"))).toBe(true)
+      expect(await exists(canonical)).toBe(true)
+      for (const dir of [".claude/skills", ".gemini/config/skills"]) expect(await trashDirs(join(fx.home, dir))).toEqual([])
+    })
+
+  test("a copy replaced between the request and the job, even by an identical one: skipped", async () => {
+    const { fx, canonical, claude } = await withCopies()
+    const w = await wire(fx, { check: deletedCheck("owner/repo", ["gone"]) })
+    const removePlans = await shownPlans(w, ["gone"], { gone: [claude] })
+    w.upstream.onAsk = async () => {
+      await rm(claude, { recursive: true })
+      await fx.skill(".claude/skills", "gone") // same bytes, a new folder
+    }
+    const job = await jobOf(w, await w.run({ scope: "user", remove: ["gone"], removePlans }))
+    expect(job.status).toBe("error")
+    expect(job.log).toContain(
+      `Skipped gone (removal_plan_changed): ${claude} is not the folder that was checked when the removal was requested. Open the dialog again.`
+    )
+    expect(w.calls.some((c) => c[0] === "remove")).toBe(false)
+    expect(await exists(claude)).toBe(true)
+    expect(await exists(canonical)).toBe(true)
+  })
+})
+
+describe("verification reads raw lock keys (review round 8, item 4)", () => {
+  test("a malformed entry for a removed name counts as still present", async () => {
+    const fx = await makeFixture()
+    await fx.writeLock({ foo: {} })
+    await fx.skill(".agents/skills", "foo")
+    const w = await wire(fx, {})
+    const [plan] = await w.guard.plans("user", ["foo"])
+    await rm(join(fx.home, ".agents/skills/foo"), { recursive: true })
+    await writeFile(fx.lockPath, JSON.stringify({ version: 3, skills: { foo: { computedHash: "x" } } }))
+    const strict = await readLockStrict(fx.lockPath)
+    expect(strict.skills.has("foo")).toBe(false) // the typed parse drops it
+    expect(strict.rawKeys).toEqual(["foo"])
+    const malformed = await w.guard.verify("user", [plan], "", 0)
+    expect(malformed.removed).toEqual([])
+    expect(malformed.incomplete[0].problems).toContain('still in the lock file: "foo" (malformed entry)')
+    // A key the CLI resolves to the same folder name counts too.
+    await writeFile(fx.lockPath, JSON.stringify({ version: 3, skills: { Foo: { source: "owner/repo" } } }))
+    expect((await w.guard.verify("user", [plan], "", 0)).incomplete[0].problems).toContain('still in the lock file: "Foo"')
+    await writeFile(fx.lockPath, JSON.stringify({ version: 3, skills: { bar: null } }))
+    expect((await w.guard.verify("user", [plan], "", 0)).removed).toEqual(["foo"])
   })
 })

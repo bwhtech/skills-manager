@@ -190,7 +190,7 @@ describe("POST /updates/run with remove", () => {
     blocking.update({ scope: "user", names: ["gone-one"] })
     let err: HttpError | null = null
     try {
-      const plan = { scope: "user", name: "gone-one", willDelete: [], kept: [], agents: ["codex"], intent: "cleanup" as const, copies: [], deleteCopies: [], fingerprint: "", candidates: [] }
+      const plan = { scope: "user", name: "gone-one", willDelete: [], kept: [], agents: ["codex"], intent: "cleanup" as const, copies: [], deleteCopies: [], identities: {}, fingerprint: "", candidates: [] }
       blocking.update({ scope: "user", names: [], remove: { plans: [plan], shown: new Map() } })
     } catch (e) {
       err = e as HttpError

@@ -128,7 +128,15 @@ function RemovableSkillButton({ skill }: { skill: SkillSummary }) {
                   </p>
                 )}
                 {plan.willDelete.length > 0 ? (
-                  <PathList label="Deletes" paths={plan.willDelete.map((path) => ({ path }))} home={home} destructive />
+                  <PathList
+                    label="Deletes"
+                    paths={plan.willDelete.map((path) => ({
+                      path,
+                      reason: plan.promoted?.find((p) => p.path === path)?.reason,
+                    }))}
+                    home={home}
+                    destructive
+                  />
                 ) : (
                   !plan.blocked && <p className="text-xs text-muted-foreground">No folders on disk: only the lock entry is removed.</p>
                 )}

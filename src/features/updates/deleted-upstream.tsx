@@ -377,6 +377,7 @@ export function CopyList({
                       <span className="text-amber-700 dark:text-amber-300">· keeps the skill while it exists</span>
                     )}
                   </span>
+                  <CopyReasons copy={copy} />
                 </span>
               </label>
             </li>
@@ -390,12 +391,16 @@ export function CopyList({
 function CopyBadge({ copy }: { copy: RemovalCopy }) {
   if (copy.identical)
     return (
-      <Badge variant="secondary" className="h-5 px-1.5 font-normal">
+      <Badge
+        variant="secondary"
+        className="h-5 px-1.5 font-normal"
+        title="Same files, bytes, links and permissions as the canonical folder, and nothing else"
+      >
         identical
       </Badge>
     )
   const detail =
-    copy.differences !== undefined ? plural(copy.differences, "file") : copy.tooLarge ? "too large to compare" : copy.reason
+    copy.differences !== undefined ? `${copy.differences} ${copy.differences === 1 ? "entry" : "entries"}` : copy.tooLarge ? "too large to compare" : null
   return (
     <Badge
       variant="outline"
@@ -404,6 +409,19 @@ function CopyBadge({ copy }: { copy: RemovalCopy }) {
     >
       differs{detail ? ` · ${detail}` : ""}
     </Badge>
+  )
+}
+
+/** Why a copy differs, one reason per line (e.g. "has .git history (.git)"). */
+function CopyReasons({ copy }: { copy: RemovalCopy }) {
+  const reasons = copy.reasons ?? (copy.reason ? [copy.reason] : [])
+  if (copy.identical || reasons.length === 0) return null
+  return (
+    <ul className="flex flex-col gap-0.5 text-xs break-words text-amber-800 dark:text-amber-200" aria-label="Why it differs">
+      {reasons.map((reason) => (
+        <li key={reason}>{reason}</li>
+      ))}
+    </ul>
   )
 }
 
