@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState, useSyncExternalStore } from "react"
 import type { InstructionFile, ScopeKey } from "@shared/api"
 import { ScreenBar, StackScreen } from "@/components/layout/stack-screen"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
@@ -6,10 +6,11 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Skeleton } from "@/components/ui/skeleton"
 import { errorMessage, useInstructions } from "@/lib/api"
 import { useIsDesktop } from "@/hooks/use-media-query"
+import { getDraft, isDraftDirty, subscribeDrafts } from "@/lib/drafts"
 import { goUp, navigate } from "@/lib/hash-state"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { CreateInstruction } from "./create-instruction"
-import { InstructionEditor } from "./instruction-editor"
+import { InstructionEditor, instructionDraftKey } from "./instruction-editor"
 import { InstructionList } from "./instruction-list"
 
 interface InstructionsViewProps {
@@ -21,6 +22,15 @@ export function InstructionsView({ scope, docId }: InstructionsViewProps) {
   const isDesktop = useIsDesktop()
   const files = useInstructions(scope)
   const list = files.data ?? []
+  // Desktop shows a default file at doc=null. If it has a draft when the
+  // layout switches to phones, open its screen, so the draft stays in view.
+  const fallbackId = docId ? null : (pickDefault(list, null)?.id ?? null)
+  const fallbackDirty = useSyncExternalStore(subscribeDrafts, () =>
+    fallbackId ? isDraftDirty(getDraft(instructionDraftKey(fallbackId))) : false
+  )
+  useEffect(() => {
+    if (!isDesktop && fallbackId && fallbackDirty) navigate({ doc: fallbackId }, { replace: true, force: true })
+  }, [isDesktop, fallbackId, fallbackDirty])
 
   const listPane = (
     <InstructionListPane

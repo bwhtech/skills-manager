@@ -156,9 +156,9 @@ function PhoneHeader() {
               </span>
             </DropdownMenuItem>
             {updates.inScope.length > 0 && (
-              <DropdownMenuItem disabled={updates.updating} onClick={updates.updateAll}>
-                {updates.updating ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
-                <span className="truncate">Update all {updates.inScope.length} in {name}</span>
+              <DropdownMenuItem onClick={updates.updateAll}>
+                <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />
+                <span className="truncate">Update all {updates.inScope.length} in {name}…</span>
               </DropdownMenuItem>
             )}
             <DropdownMenuSeparator />

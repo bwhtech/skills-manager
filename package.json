@@ -13,7 +13,7 @@
     "server": "bun server/index.ts",
     "dev:server": "bun --watch server/index.ts",
     "start": "vite build && bun server/index.ts",
-    "test": "bun test server"
+    "test": "bun test server src/lib"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
@@ -29,6 +29,7 @@
     "@hugeicons/core-free-icons": "^4.4.0",
     "@hugeicons/react": "^1.1.10",
     "@lezer/highlight": "^1.2.5",
+    "@pierre/diffs": "1.6.4",
     "@tailwindcss/vite": "^4",
     "@tanstack/react-query": "^5.108.2",
     "class-variance-authority": "^0.7.1",

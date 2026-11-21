@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState, useSyncExternalStore } from "react"
 import type { SkillDetail } from "@shared/api"
 import { ScreenBar, StackScreen } from "@/components/layout/stack-screen"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
@@ -7,9 +7,10 @@ import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { errorMessage, HttpError, useSkill } from "@/lib/api"
 import { basename } from "@/lib/format"
+import { getDraft, isDraftDirty, subscribeDrafts } from "@/lib/drafts"
 import { goUp, navigate } from "@/lib/hash-state"
 import { FileTree } from "./file-tree"
-import { EditorSkeleton, SKILL_MD, SkillFileEditor } from "./skill-file-editor"
+import { EditorSkeleton, SKILL_MD, SkillFileEditor, skillDraftKey } from "./skill-file-editor"
 import { SkillHeader } from "./skill-header"
 import { SkillInfo } from "./skill-info"
 
@@ -76,6 +77,14 @@ function SkillError({ error }: { error: Error }) {
 export function SkillScreens({ skillId, file }: { skillId: string; file: string | null }) {
   const skill = useSkill(skillId)
   const [dirty, setDirty] = useState(false)
+  // Desktop shows SKILL.md at file=null. If it has a draft when the layout
+  // switches to this one, open its screen, so the draft stays in view.
+  const skillMdDirty = useSyncExternalStore(subscribeDrafts, () =>
+    isDraftDirty(getDraft(skillDraftKey(skillId, SKILL_MD)))
+  )
+  useEffect(() => {
+    if (!file && skillMdDirty) navigate({ file: SKILL_MD }, { replace: true, force: true })
+  }, [file, skillMdDirty])
   const data = skill.data
   const path = data ? filePath(data, file) : (file ?? SKILL_MD)
 

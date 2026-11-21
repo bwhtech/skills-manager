@@ -1,5 +1,6 @@
 import {
   keepPreviousData,
+  queryOptions,
   useMutation,
   useQuery,
   useQueryClient,
@@ -22,6 +23,7 @@ import {
   type SearchResult,
   type SkillDetail,
   type SkillSummary,
+  type UpdatePreview,
   type UpdateRunRequest,
   type UpdateStatus,
 } from "@shared/api"
@@ -107,6 +109,7 @@ export const api = {
   updates: () => request<UpdateStatus>("GET", "/api/updates"),
   checkUpdates: () => request<UpdateStatus>("POST", "/api/updates/check"),
   runUpdate: (body: UpdateRunRequest) => request<JobRef>("POST", "/api/updates/run", body),
+  updatePreview: (id: string) => request<UpdatePreview>("GET", `/api/skills/${id}/update-preview`),
 
   search: (text: string) => request<SearchResult[]>("GET", `/api/search?${q({ q: text })}`),
   repoSkills: (source: string) => request<RepoSkill[]>("POST", "/api/repo/skills", { source }),
@@ -126,6 +129,8 @@ export const keys = {
   instructions: (scope: ScopeKey) => ["instructions", scope] as const,
   instruction: (id: string) => ["instruction", id] as const,
   updates: ["updates"] as const,
+  updatePreviews: ["update-preview"] as const,
+  updatePreview: (id: string) => ["update-preview", id] as const,
   search: (text: string) => ["search", text] as const,
   jobs: ["jobs"] as const,
 }
@@ -181,6 +186,54 @@ export function useUpdates() {
   })
 }
 
+// Each preview fetches the skill's source from upstream (1-2 s the first time),
+// so at most this many run at once, e.g. when Update all loads every summary.
+const PREVIEW_CONCURRENCY = 3
+let previewsInFlight = 0
+const previewQueue: (() => void)[] = []
+
+async function limitedPreview(id: string) {
+  // A finished fetch hands its slot straight to the next waiter.
+  if (previewsInFlight >= PREVIEW_CONCURRENCY) {
+    await new Promise<void>((resolve) => previewQueue.push(resolve))
+  } else {
+    previewsInFlight++
+  }
+  try {
+    return await api.updatePreview(id)
+  } finally {
+    const next = previewQueue.shift()
+    if (next) next()
+    else previewsInFlight--
+  }
+}
+
+/** What `skills update` would change in a skill folder. Not retried: the dialogs offer Retry. */
+export function updatePreviewQuery(id: string | null, enabled = true) {
+  return queryOptions({
+    queryKey: keys.updatePreview(id ?? ""),
+    queryFn: () => limitedPreview(id!),
+    enabled: !!id && enabled,
+    staleTime: 5 * 60_000,
+    gcTime: 10 * 60_000,
+    retry: false,
+  })
+}
+
+export function useUpdatePreview(id: string | null, enabled = true) {
+  return useQuery(updatePreviewQuery(id, enabled))
+}
+
+/** HTTP status of a failed preview, and whether it rules the update out. */
+export function previewFailure(error: unknown) {
+  const status = error instanceof HttpError ? error.status : 0
+  const message =
+    error instanceof HttpError ? (error.body.detail ?? error.body.error) : errorMessage(error)
+  // 400: skills update would skip the skill. 409: the update would fail upstream.
+  const blocking = status === 400 || status === 409
+  return { status, message, blocking }
+}
+
 export function useSearch(text: string) {
   return useQuery({
     queryKey: keys.search(text),
@@ -232,4 +285,17 @@ export function invalidateAfterJob(client: ReturnType<typeof useQueryClient>) {
   for (const key of [["skills"], ["skill"], keys.updates, keys.scopes, keys.jobs]) {
     void client.invalidateQueries({ queryKey: key })
   }
+}
+
+/**
+ * Drop update previews whose skill folder changed (an update ran, SKILL.md was saved).
+ * Reset, not invalidate: a stale diff must not show while the fresh one loads.
+ * No ids = every preview.
+ */
+export function resetUpdatePreviews(client: ReturnType<typeof useQueryClient>, ids?: string[]) {
+  if (!ids) {
+    void client.resetQueries({ queryKey: keys.updatePreviews })
+    return
+  }
+  for (const id of ids) void client.resetQueries({ queryKey: keys.updatePreview(id) })
 }

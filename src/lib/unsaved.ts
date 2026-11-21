@@ -1,15 +1,13 @@
-// One editor is open at a time. It reports here whether it has unsaved
-// changes, so navigation can ask before it throws them away.
+// The leave guard. Drafts (lib/drafts.ts) know whether any document has
+// unsaved changes, also one whose editor is not mounted right now (a layout
+// switch unmounted it), so navigation can ask before it throws them away.
 
-let dirty = false
+import { discardDrafts, hasDirtyDrafts } from "@/lib/drafts"
+
 let ask: ((proceed: () => void) => void) | null = null
 
-export function setDirty(value: boolean) {
-  dirty = value
-}
-
 export function isDirty() {
-  return dirty
+  return hasDirtyDrafts()
 }
 
 /** The unsaved-changes dialog registers itself here. */
@@ -19,9 +17,9 @@ export function registerLeavePrompt(prompt: ((proceed: () => void) => void) | nu
 
 /** Run proceed now, or after the user agrees to discard unsaved changes. */
 export function confirmLeave(proceed: () => void) {
-  if (!dirty) return proceed()
+  if (!isDirty()) return proceed()
   const run = () => {
-    dirty = false
+    discardDrafts()
     proceed()
   }
   if (ask) ask(run)
@@ -29,5 +27,5 @@ export function confirmLeave(proceed: () => void) {
 }
 
 window.addEventListener("beforeunload", (event) => {
-  if (dirty) event.preventDefault()
+  if (isDirty()) event.preventDefault()
 })

@@ -10,11 +10,27 @@ export interface SkillMdRef {
   name?: string
 }
 
+/** A skill as the CLI's discoverSkills reports it. */
+export interface DiscoveredSkill {
+  /** source-relative posix path of its SKILL.md */
+  path: string
+  /** frontmatter name */
+  name: string
+}
+
 /** A fetched source on disk. */
 export interface Checkout {
   /** commit sha, if known */
   readonly ref: string | null
+  /** the folder that holds the source; nothing outside it is read */
+  readonly root: string
+  /** every SKILL.md path in the source, without reading the files */
   listSkillMds(): Promise<SkillMdRef[]>
+  /**
+   * The skills `skills update` finds when it looks a skill up by name:
+   * discoverSkills in the CLI, with the options update uses for this kind.
+   */
+  discover(): Promise<DiscoveredSkill[]>
   /** absolute path of a repo-relative folder, fetched on demand */
   folder(path: string): Promise<string>
 }

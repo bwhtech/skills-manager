@@ -230,6 +230,12 @@ export interface UpdateRunRequest {
 //   400 when `skills update` cannot update the skill (e.g. local or legacy lock entries),
 //   409 when the update would fail (skill deleted, moved ambiguously or renamed upstream),
 //   502 when the source could not be fetched, 504 when the fetch timed out.
+//   413 (error "preview_too_large", detail "Preview too large: ...") when a limit is passed,
+//   instead of a partial preview: more than 2,000 files in the local or the upstream skill
+//   folder, more than 50 MB to read for the diff, a source over 300 MB on disk, more than
+//   5,000 SKILL.md files when the skill must be found by name, or an upstream SKILL.md over 256 KB.
+//   409 also when the upstream SKILL.md is unsafe to read (error "unsafe_upstream": a link
+//   out of the skill folder, or not a regular file).
 //   The upstream fetch is cached per (source, ref) for about 10 minutes.
 export interface UpdatePreview {
   skillId: string
@@ -257,7 +263,7 @@ export interface UpdateFileChange {
   oldContent?: string
   /** omitted for removed files, binary files, and files over the size cap */
   newContent?: string
-  tooLarge?: boolean // over 256 KB; contents omitted
+  tooLarge?: boolean // over 256 KB: compared by SHA-256; contents omitted, line counts 0
   linesAdded: number
   linesRemoved: number
 }

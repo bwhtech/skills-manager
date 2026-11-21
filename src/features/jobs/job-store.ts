@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react"
 import { toast } from "sonner"
 import type { Job } from "@shared/api"
-import { api, invalidateAfterJob } from "@/lib/api"
+import { api, invalidateAfterJob, resetUpdatePreviews } from "@/lib/api"
 import { queryClient } from "@/lib/query-client"
 import { ui } from "@/lib/ui-store"
 
@@ -16,6 +16,8 @@ export interface LiveJob {
 
 const live = new Map<string, LiveJob>()
 const sources = new Map<string, EventSource>()
+/** Skill ids whose update previews a job makes stale, set by whoever started it. */
+const previewIdsByJob = new Map<string, string[]>()
 const listeners = new Set<() => void>()
 
 function emit() {
@@ -63,6 +65,11 @@ function parseLine(data: string) {
 
 function onFinished(job: Job) {
   invalidateAfterJob(queryClient)
+  const previewIds = previewIdsByJob.get(job.id)
+  previewIdsByJob.delete(job.id)
+  // An update or install started elsewhere can change any folder: drop every preview.
+  if (previewIds) resetUpdatePreviews(queryClient, previewIds)
+  else if (job.kind !== "remove") resetUpdatePreviews(queryClient)
   const action = { label: "Show log", onClick: () => ui.openJobs(job.id) }
   if (job.status === "success") {
     toast.success(job.title, { description: "Finished", action })
@@ -83,8 +90,12 @@ export function useLiveJob(jobId: string | null): LiveJob | null {
   return useSyncExternalStore(subscribe, () => (jobId ? (live.get(jobId) ?? null) : null))
 }
 
-/** Start a job's stream and show it in the jobs drawer. */
-export function showJob(jobId: string) {
+/**
+ * Start a job's stream and show it in the jobs drawer.
+ * previewIds: the skills it updates, whose update previews reset when it ends.
+ */
+export function showJob(jobId: string, options: { previewIds?: string[] } = {}) {
+  if (options.previewIds) previewIdsByJob.set(jobId, options.previewIds)
   watchJob(jobId)
   ui.openJobs(jobId)
 }

@@ -17,10 +17,17 @@ import { JobManager } from "../jobs.ts"
 import { HttpError } from "../lib/errors.ts"
 import { MAX_DIFF_BYTES, diffFolders } from "../preview/folder-diff.ts"
 import { countLineChanges } from "../preview/line-diff.ts"
-import { planUpdate, type SourceSpec } from "../preview/plan.ts"
+import { discoverInView, discoverWithCli } from "../preview/cli-sources.ts"
+import { mapLimit } from "../preview/limits.ts"
+import {
+  planUpdate,
+  type PreviewPlan,
+  type SourceSpec,
+} from "../preview/plan.ts"
 import {
   UpdatePreviewService,
   locateSkill,
+  readUpstreamSkillMd,
   setFrontmatterName,
 } from "../preview/service.ts"
 import {
@@ -77,8 +84,8 @@ describe("diffFolders", () => {
       "gone.md": "bye\n",
       "img.png": new Uint8Array([1, 0, 2]),
       "big.txt": big,
-      "node_modules/x.js": "ignored",
       "local-only/metadata.json": "{}",
+      ".git/HEAD": "ref",
     })
     const upstream = await tree(join(tmp, "upstream"), {
       "SKILL.md": "---\nname: s\n---\nnew\nmore\n",
@@ -117,16 +124,129 @@ describe("diffFolders", () => {
     expect(byPath["new/b.md"].oldContent).toBeUndefined()
     expect(byPath["img.png"]).toMatchObject({ binary: true, linesAdded: 0 })
     expect(byPath["img.png"].oldContent).toBeUndefined()
-    expect(byPath["big.txt"]).toMatchObject({ tooLarge: true, linesAdded: 1 })
+    // over the cap: compared by hash, no contents, no line counts
+    expect(byPath["big.txt"]).toMatchObject({
+      tooLarge: true,
+      binary: false,
+      linesAdded: 0,
+      linesRemoved: 0,
+    })
     expect(byPath["big.txt"].oldContent).toBeUndefined()
     expect(byPath["big.txt"].newContent).toBeUndefined()
     expect(diff.summary).toEqual({
       added: 1,
       removed: 2,
       modified: 3,
-      linesAdded: 4,
+      linesAdded: 3,
       linesRemoved: 3,
     })
+  })
+
+  test("upstream side uses exactly the CLI's copy exclusions", async () => {
+    const local = await tree(join(tmp, "excl-local"), {
+      "SKILL.md": "a\n",
+      "node_modules/x.js": "local dep\n",
+      "__pycache__/c.pyc": "x",
+      ".git/HEAD": "ref",
+    })
+    const upstream = await tree(join(tmp, "excl-up"), {
+      "SKILL.md": "a\n",
+      "node_modules/y.js": "copied by the CLI\n",
+      "dist/out.js": "copied too\n",
+      "metadata.json/inner.txt": "a dir named metadata.json is skipped\n",
+      "sub/metadata.json": "{}",
+      "__pypackages__/p.py": "x",
+      "__pycache__/c.pyc": "x",
+      ".git/HEAD": "ref",
+    })
+    const diff = await diffFolders(local, upstream)
+    expect(diff.files.map((f) => [f.path, f.status])).toEqual([
+      ["__pycache__/c.pyc", "removed"],
+      ["dist/out.js", "added"],
+      ["node_modules/x.js", "removed"],
+      ["node_modules/y.js", "added"],
+    ])
+  })
+
+  test("large files: equal by hash, different sizes, binary sniff", async () => {
+    const size = MAX_DIFF_BYTES + 100
+    const same = "s".repeat(size)
+    const a = "a".repeat(size)
+    const b = "b".repeat(size)
+    const bin = new Uint8Array(size)
+    const local = await tree(join(tmp, "large-local"), {
+      "same.txt": same,
+      "changed.txt": a,
+      "grown.txt": "small\n",
+      "blob.bin": bin,
+    })
+    const upstream = await tree(join(tmp, "large-up"), {
+      "same.txt": same,
+      "changed.txt": b,
+      "grown.txt": a,
+      "blob.bin": new Uint8Array(size).fill(7, 9000),
+      "new-large.txt": b,
+    })
+    const diff = await diffFolders(local, upstream)
+    const byPath = Object.fromEntries(diff.files.map((f) => [f.path, f]))
+    expect(Object.keys(byPath).sort()).toEqual([
+      "blob.bin",
+      "changed.txt",
+      "grown.txt",
+      "new-large.txt",
+    ])
+    expect(byPath["changed.txt"]).toEqual({
+      path: "changed.txt",
+      status: "modified",
+      binary: false,
+      tooLarge: true,
+      linesAdded: 0,
+      linesRemoved: 0,
+    })
+    expect(byPath["grown.txt"]).toMatchObject({ tooLarge: true, linesAdded: 0 })
+    expect(byPath["grown.txt"].oldContent).toBeUndefined()
+    expect(byPath["blob.bin"]).toMatchObject({
+      binary: true,
+      status: "modified",
+    })
+    expect(byPath["blob.bin"].tooLarge).toBeUndefined()
+    expect(byPath["new-large.txt"]).toMatchObject({
+      status: "added",
+      tooLarge: true,
+    })
+  })
+
+  test("too many files or bytes is a 413, not a partial diff", async () => {
+    const files = Object.fromEntries(
+      Array.from({ length: 5 }, (_, i) => [`f${i}.md`, `${i}\n`])
+    )
+    const local = await tree(join(tmp, "limit-local"), { "SKILL.md": "a\n" })
+    const upstream = await tree(join(tmp, "limit-up"), files)
+    const limits = {
+      maxFilesPerSide: 4,
+      maxReadBytes: 1 << 20,
+      readConcurrency: 2,
+    }
+    const err = await diffFolders(local, upstream, new Map(), limits).catch(
+      (e) => e
+    )
+    expect(err).toMatchObject({ status: 413, message: "preview_too_large" })
+    expect((err as HttpError).detail).toStartWith("Preview too large:")
+    expect((err as HttpError).detail).toContain("upstream")
+
+    const bytes = await diffFolders(local, upstream, new Map(), {
+      maxFilesPerSide: 10,
+      maxReadBytes: 8,
+      readConcurrency: 2,
+    }).catch((e) => e)
+    expect(bytes).toMatchObject({ status: 413, message: "preview_too_large" })
+  })
+
+  test("a FIFO in a skill folder is skipped, not read", async () => {
+    const local = await tree(join(tmp, "fifo-local"), { "SKILL.md": "a\n" })
+    const upstream = await tree(join(tmp, "fifo-up"), { "SKILL.md": "a\n" })
+    expect(Bun.spawnSync(["mkfifo", join(upstream, "pipe")]).exitCode).toBe(0)
+    expect((await diffFolders(local, upstream)).upToDate).toBe(true)
   })
 
   test("identical folders are up to date", async () => {
@@ -175,7 +295,9 @@ describe("SourceCache", () => {
   const spec = (url: string): SourceSpec => ({ kind: "git", url, ref: null })
   const stubCheckout: Checkout = {
     ref: "abc",
+    root: "/nowhere",
     listSkillMds: async () => [],
+    discover: async () => [],
     folder: async (p) => p,
   }
 
@@ -296,7 +418,26 @@ describe("planUpdate", () => {
       skillPath: "skills/foo/SKILL.md",
       sourceName: "foo",
       renameTo: null,
+      fullDepth: false,
     })
+  })
+
+  test("sources without a subpath resolve by name (full depth)", () => {
+    const full = (entry: Partial<LockEntry>) =>
+      planUpdate({ ...github, ...entry }, "foo", true).fullDepth
+    expect(full({})).toBe(false)
+    expect(
+      full({ sourceType: "git", sourceUrl: "https://git.example.com/o/r.git" })
+    ).toBe(true)
+    expect(
+      full({ sourceType: "gitlab", sourceUrl: "https://gitlab.com/o/r" })
+    ).toBe(false)
+    expect(full({ sourceType: "git", sourceUrl: "git@example.com:o/r" })).toBe(
+      true
+    )
+    expect(
+      full({ source: "https://github.com/o/r.git", sourceType: "github" })
+    ).toBe(true)
   })
 
   test("project shorthand without sourceUrl becomes a GitHub URL", () => {
@@ -393,64 +534,229 @@ describe("planUpdate", () => {
 })
 
 describe("locateSkill", () => {
-  async function checkout(files: Record<string, string>): Promise<Checkout> {
+  const md = (name: string) => `---\nname: ${name}\ndescription: d\n---\nbody\n`
+  /** A checkout over a folder; discover() runs the CLI's own discoverSkills. */
+  async function checkout(
+    files: Record<string, string>,
+    kind: "git" | "download" = "git"
+  ): Promise<Checkout> {
     const root = await tree(await mkdtemp(join(tmp, "co-")), files)
+    const options =
+      kind === "git"
+        ? { fullDepth: true, includeDuplicateNames: true }
+        : { fullDepth: true, includeInternal: true }
     return {
       ref: null,
+      root,
       listSkillMds: async () =>
         Object.keys(files)
-          .filter((p) => p.endsWith("SKILL.md"))
+          .filter((p) => p === "SKILL.md" || p.endsWith("/SKILL.md"))
           .map((path) => ({ path })),
+      discover: () => discoverWithCli(root, options),
       folder: async (p) => (p ? join(root, p) : root),
     }
   }
-  const plan = (skillPath: string | null, sourceName = "foo") => ({
+  const plan = (
+    skillPath: string | null,
+    sourceName = "foo",
+    extra: Partial<PreviewPlan> = {}
+  ): PreviewPlan => ({
     spec: { kind: "git" as const, url: "https://x/r.git", ref: null },
     skillPath,
     sourceName,
     renameTo: null,
+    fullDepth: false,
+    ...extra,
   })
+  const errorOf = (p: Promise<unknown>) =>
+    p.then(
+      () => null,
+      (err) => err as HttpError
+    )
 
-  test("uses the locked path, else the folder with the skill's name", async () => {
+  test("uses the locked path while it exists", async () => {
     const co = await checkout({
-      "skills/foo/SKILL.md": "---\nname: foo\n---\n",
-      "moved/foo/SKILL.md": "---\nname: foo\n---\n",
+      "skills/foo/SKILL.md": md("foo"),
+      "moved/foo/SKILL.md": md("foo"),
     })
-    expect(await locateSkill(co, plan("skills/foo/SKILL.md"))).toEndWith(
-      "/skills/foo"
-    )
-    const moved = await checkout({
-      "moved/foo/SKILL.md": "---\nname: foo\n---\n",
-    })
-    expect(await locateSkill(moved, plan("skills/foo/SKILL.md"))).toEndWith(
-      "/moved/foo"
-    )
+    const found = await locateSkill(co, plan("skills/foo/SKILL.md"))
+    expect(found.dir).toEndWith("/skills/foo")
+    expect(found.skillMd).toBe(md("foo"))
   })
 
-  test("deleted, ambiguous or renamed upstream is 409", async () => {
-    const statusOf = (p: Promise<unknown>) =>
-      p.then(
-        () => 200,
-        (err) => (err as HttpError).status
-      )
-    const gone = await checkout({
-      "skills/bar/SKILL.md": "---\nname: bar\n---\n",
+  test("a moved folder is found by its frontmatter name", async () => {
+    const co = await checkout({
+      "skills/bar/SKILL.md": md("bar"),
+      "elsewhere/deeper/renamed-dir/SKILL.md": md("foo"),
     })
-    expect(await statusOf(locateSkill(gone, plan("skills/foo/SKILL.md")))).toBe(
-      409
-    )
-    const twice = await checkout({
-      "a/foo/SKILL.md": "---\nname: foo\n---\n",
-      "b/foo/SKILL.md": "---\nname: foo\n---\n",
-    })
-    expect(await statusOf(locateSkill(twice, plan(null)))).toBe(409)
-    const renamed = await checkout({
-      "skills/foo/SKILL.md": "---\nname: other\n---\n",
-    })
-    expect(
-      await statusOf(locateSkill(renamed, plan("skills/foo/SKILL.md")))
-    ).toBe(409)
+    const found = await locateSkill(co, plan("skills/foo/SKILL.md"))
+    expect(found.dir).toEndWith("/elsewhere/deeper/renamed-dir")
   })
+
+  test("two folders with the same frontmatter name are ambiguous (409)", async () => {
+    const co = await checkout({
+      "a/one/SKILL.md": md("foo"),
+      "b/two/SKILL.md": md("Foo"),
+    })
+    const err = await errorOf(locateSkill(co, plan("skills/foo/SKILL.md")))
+    expect(err).toMatchObject({ status: 409, message: "ambiguous_upstream" })
+  })
+
+  test("a folder named like the skill with another frontmatter name is not it", async () => {
+    const co = await checkout({ "moved/foo/SKILL.md": md("other") })
+    const err = await errorOf(locateSkill(co, plan("skills/foo/SKILL.md")))
+    expect(err).toMatchObject({ status: 409, message: "not_upstream" })
+  })
+
+  test("a SKILL.md the CLI rejects (no description) does not count", async () => {
+    const co = await checkout({ "moved/foo/SKILL.md": "---\nname: foo\n---\n" })
+    const err = await errorOf(locateSkill(co, plan("skills/foo/SKILL.md")))
+    expect(err).toMatchObject({ status: 409, message: "not_upstream" })
+  })
+
+  test("full-depth sources: a second skill with the name is ambiguous even at the locked path", async () => {
+    const files = {
+      "skills/foo/SKILL.md": md("foo"),
+      "copy/foo/SKILL.md": md("foo"),
+    }
+    const locked = plan("skills/foo/SKILL.md", "foo", { fullDepth: true })
+    const err = await errorOf(locateSkill(await checkout(files), locked))
+    expect(err).toMatchObject({ status: 409, message: "ambiguous_upstream" })
+    const single = await checkout({ "skills/foo/SKILL.md": md("foo") })
+    expect((await locateSkill(single, locked)).dir).toEndWith("/skills/foo")
+  })
+
+  test("renamed at the locked path is 409", async () => {
+    const co = await checkout({ "skills/foo/SKILL.md": md("other") })
+    const err = await errorOf(locateSkill(co, plan("skills/foo/SKILL.md")))
+    expect(err).toMatchObject({ status: 409, message: "renamed_upstream" })
+  })
+
+  test("download sources: exact name, the locked path first, else the first", async () => {
+    const co = await checkout(
+      {
+        "a/SKILL.md": md("foo"),
+        "b/SKILL.md": md("foo"),
+        "c/SKILL.md": md("Foo"),
+      },
+      "download"
+    )
+    // As the CLI's resolveSkills reports a download (duplicate names kept
+    // here so the locked-path preference shows).
+    co.discover = async () => [
+      { path: "c/SKILL.md", name: "Foo" },
+      { path: "a/SKILL.md", name: "foo" },
+      { path: "b/SKILL.md", name: "foo" },
+    ]
+    const dl = (skillPath: string | null, sourceName = "foo") =>
+      plan(skillPath, sourceName, {
+        spec: { kind: "download", url: "https://example.com/s.zip" },
+      })
+    expect((await locateSkill(co, dl("b/SKILL.md"))).dir).toEndWith("/b")
+    expect((await locateSkill(co, dl("gone/SKILL.md"))).dir).toEndWith("/a")
+    expect((await locateSkill(co, dl(null, "Foo"))).dir).toEndWith("/c")
+    const err = await errorOf(locateSkill(co, dl(null, "FOO")))
+    expect(err).toMatchObject({ status: 409, message: "not_upstream" })
+  })
+})
+
+describe("readUpstreamSkillMd", () => {
+  const secret = "TOP-SECRET-CONTENT"
+
+  test("a SKILL.md link out of the source is refused without quoting it", async () => {
+    const outside = await tree(join(tmp, "rs-outside"), {
+      "SKILL.md": `---\nname: ${secret}\ndescription: d\n---\n`,
+    })
+    const root = await mkdtemp(join(tmp, "rs-src-"))
+    await mkdir(join(root, "skills/foo"), { recursive: true })
+    await symlink(join(outside, "SKILL.md"), join(root, "skills/foo/SKILL.md"))
+    const err = (await readUpstreamSkillMd(root, join(root, "skills/foo")).then(
+      () => null,
+      (e) => e
+    )) as HttpError
+    expect(err).toMatchObject({ status: 409, message: "unsafe_upstream" })
+    expect(JSON.stringify(err.detail)).not.toContain(secret)
+  })
+
+  test("a link inside the skill folder is followed; one to a sibling folder is not", async () => {
+    const root = await tree(await mkdtemp(join(tmp, "rs-in-")), {
+      "skills/foo/real.md": "inside\n",
+      "skills/shared/SKILL.md": "sibling\n",
+    })
+    await symlink("real.md", join(root, "skills/foo/SKILL.md"))
+    expect(await readUpstreamSkillMd(root, join(root, "skills/foo"))).toBe(
+      "inside\n"
+    )
+    await mkdir(join(root, "skills/bar"))
+    await symlink("../shared/SKILL.md", join(root, "skills/bar/SKILL.md"))
+    const err = await readUpstreamSkillMd(root, join(root, "skills/bar")).catch(
+      (e) => e
+    )
+    expect(err).toMatchObject({ status: 409, message: "unsafe_upstream" })
+  })
+
+  test("a skill folder that links out of the source is refused", async () => {
+    const outside = await tree(join(tmp, "rs-dir-outside"), {
+      "SKILL.md": "x\n",
+    })
+    const root = await mkdtemp(join(tmp, "rs-dir-"))
+    await symlink(outside, join(root, "foo"))
+    const err = await readUpstreamSkillMd(root, join(root, "foo")).catch(
+      (e) => e
+    )
+    expect(err).toMatchObject({ status: 409, message: "unsafe_upstream" })
+  })
+
+  test("a FIFO is refused without blocking; over 256 KB is a 413", async () => {
+    const root = await mkdtemp(join(tmp, "rs-fifo-"))
+    await mkdir(join(root, "foo"))
+    expect(Bun.spawnSync(["mkfifo", join(root, "foo/SKILL.md")]).exitCode).toBe(
+      0
+    )
+    const err = await readUpstreamSkillMd(root, join(root, "foo")).catch(
+      (e) => e
+    )
+    expect(err).toMatchObject({ status: 409, message: "unsafe_upstream" })
+    await tree(root, { "big/SKILL.md": "x".repeat(MAX_DIFF_BYTES + 1) })
+    const big = await readUpstreamSkillMd(root, join(root, "big")).catch(
+      (e) => e
+    )
+    expect(big).toMatchObject({ status: 413, message: "preview_too_large" })
+  })
+})
+
+describe("discoverInView", () => {
+  test("never reads a linked SKILL.md outside the source", async () => {
+    const outside = await tree(join(tmp, "dv-outside"), {
+      "SKILL.md": "---\nname: foo\ndescription: d\n---\n",
+    })
+    const root = await tree(await mkdtemp(join(tmp, "dv-src-")), {
+      "skills/bar/SKILL.md": "---\nname: bar\ndescription: d\n---\n",
+    })
+    await mkdir(join(root, "skills/foo"))
+    await symlink(join(outside, "SKILL.md"), join(root, "skills/foo/SKILL.md"))
+    const found = await discoverInView(
+      root,
+      ["skills/bar/SKILL.md", "skills/foo/SKILL.md"],
+      join(tmp, "dv-view"),
+      { fullDepth: true, includeDuplicateNames: true }
+    )
+    expect(found).toEqual([{ path: "skills/bar/SKILL.md", name: "bar" }])
+  })
+})
+
+test("mapLimit keeps order and bounds concurrency", async () => {
+  let active = 0
+  let peak = 0
+  const out = await mapLimit([5, 1, 4, 2, 3, 0, 6], 3, async (n) => {
+    active++
+    peak = Math.max(peak, active)
+    await Bun.sleep(n)
+    active--
+    return n * 2
+  })
+  expect(out).toEqual([10, 2, 8, 4, 6, 0, 12])
+  expect(peak).toBe(3)
 })
 
 test("setFrontmatterName matches the CLI's rewrite", () => {
@@ -490,7 +796,9 @@ describe("UpdatePreviewService", () => {
       })
       return {
         ref: "f".repeat(40),
+        root: dir,
         listSkillMds: async () => [{ path: "skills/foo/SKILL.md" }],
+        discover: async () => [],
         folder: async (p) => join(dir, p),
       }
     }

@@ -300,3 +300,17 @@
   background: transparent;
 }
 .markdown-preview .frontmatter-table td { white-space: pre-wrap; }
+
+/* ---------- Update preview diffs ----------
+   @pierre/diffs renders into a shadow root. Custom properties inherit into it,
+   and these document rules win over the library's :host defaults: app font,
+   and the dialog surface instead of the theme's own background. The
+   light/dark switch follows the .dark class (see diff-view.tsx). */
+diffs-container.update-diff {
+  --diffs-font-family: 'Geist Mono Variable', monospace;
+  --diffs-header-font-family: 'Geist Mono Variable', monospace;
+  --diffs-font-size: 12px;
+  --diffs-line-height: 18px;
+  --diffs-light-bg: var(--popover);
+  --diffs-dark-bg: var(--popover);
+}

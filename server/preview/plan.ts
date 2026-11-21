@@ -15,6 +15,12 @@ export interface PreviewPlan {
   sourceName: string
   /** set when the CLI rewrites the installed SKILL.md `name` to the lock name */
   renameTo: string | null
+  /**
+   * shouldUseFullDepthForUpdate in the CLI: the source takes no subpath (an
+   * ssh or `.git` URL, or a host other than github.com and gitlab.com), so
+   * update finds the skill by name even while the locked path exists.
+   */
+  fullDepth: boolean
 }
 
 export function cacheKey(spec: SourceSpec): string {
@@ -41,7 +47,33 @@ export function planUpdate(
     skillPath: entry.skillPath ?? null,
     sourceName,
     renameTo: entry.skillName && entry.skillName !== lockName ? lockName : null,
+    fullDepth: usesFullDepth(entry),
   }
+}
+
+/** shouldUseFullDepthForUpdate in the CLI. */
+function usesFullDepth(entry: LockEntry): boolean {
+  if (!entry.skillPath) return false
+  const source =
+    entry.sourceType && entry.sourceType !== "github"
+      ? localSource(entry)
+      : entry.source
+  return source !== null && !supportsAppendedSubpath(source)
+}
+
+/** supportsAppendedSubpath in the CLI. */
+function supportsAppendedSubpath(source: string): boolean {
+  if (source.startsWith("git@") || source.startsWith("ssh://")) return false
+  if (source.endsWith(".git")) return false
+  if (source.startsWith("http://") || source.startsWith("https://")) {
+    try {
+      const host = new URL(source).hostname
+      return host === "github.com" || host === "gitlab.com"
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 function globalSpec(entry: LockEntry): SourceSpec {

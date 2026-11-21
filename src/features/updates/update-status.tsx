@@ -7,15 +7,14 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { api, errorMessage, useCheckUpdates, useJobMutation, useUpdates } from "@/lib/api"
+import { errorMessage, useCheckUpdates, useUpdates } from "@/lib/api"
 import { basename, plural, timeAgo } from "@/lib/format"
-import { showJob } from "@/features/jobs/job-store"
+import { ui } from "@/lib/ui-store"
 
 /** Update check state and actions for a scope; shared by the desktop header and the phone menu. */
 export function useUpdateActions(scope: ScopeKey) {
   const updates = useUpdates()
   const check = useCheckUpdates()
-  const run = useJobMutation(api.runUpdate)
   const status = updates.data
   const checking = !!status?.checking || check.isPending
   const total = status?.available.length ?? 0
@@ -27,14 +26,8 @@ export function useUpdateActions(scope: ScopeKey) {
       onError: (error) => toast.error("Could not start the update check", { description: errorMessage(error) }),
     })
 
-  const updateAll = () =>
-    run.mutate(
-      { scope },
-      {
-        onSuccess: ({ jobId }) => showJob(jobId),
-        onError: (error) => toast.error("Could not start the update", { description: errorMessage(error) }),
-      }
-    )
+  // Opens the confirm dialog with a per-skill preview; the dialog runs the update.
+  const updateAll = () => ui.openUpdateAll(scope)
 
   const summary = status?.error
     ? `Some checks failed: ${status.error}`
@@ -42,11 +35,11 @@ export function useUpdateActions(scope: ScopeKey) {
       ? `Checked ${timeAgo(status.checkedAt)}`
       : "Not checked yet"
 
-  return { status, checking, total, inScope, failed, summary, refresh, updateAll, updating: run.isPending }
+  return { status, checking, total, inScope, failed, summary, refresh, updateAll }
 }
 
 export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName: string }) {
-  const { status, checking, total, inScope, failed, summary, refresh, updateAll, updating } = useUpdateActions(scope)
+  const { status, checking, total, inScope, failed, summary, refresh, updateAll } = useUpdateActions(scope)
 
   return (
     <div className="flex items-center gap-1.5">
@@ -88,8 +81,8 @@ export function UpdateStatus({ scope, scopeName }: { scope: ScopeKey; scopeName:
         </InfoTip>
       )}
       {inScope.length > 0 && (
-        <Button size="sm" className="h-7" disabled={updating} onClick={updateAll}>
-          {updating ? <Spinner /> : <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />}
+        <Button size="sm" className="h-7" onClick={updateAll}>
+          <HugeiconsIcon icon={CircleArrowUp02Icon} strokeWidth={2} />
           <span className="hidden xl:inline">Update all in {scopeName}</span>
           <span className="xl:hidden">Update {inScope.length}</span>
         </Button>

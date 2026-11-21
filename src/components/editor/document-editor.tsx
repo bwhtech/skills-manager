@@ -1,10 +1,22 @@
-import { useDeferredValue, useEffect, useRef, useState, type ReactNode } from "react"
+import { useDeferredValue, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react"
 import { toast } from "sonner"
 import type { FileContent, SaveResponse } from "@shared/api"
 import { errorMessage, isConflict } from "@/lib/api"
 import { isMod, useWindowKeydown } from "@/lib/hotkeys"
 import { useIsDesktop } from "@/hooks/use-media-query"
-import { isDirty, setDirty } from "@/lib/unsaved"
+import {
+  beginSave,
+  editDraft,
+  failSave,
+  finishSave,
+  getDraft,
+  isDraftDirty,
+  openDraft,
+  rebaseDraft,
+  retainDraft,
+  setDraftConflict,
+  subscribeDrafts,
+} from "@/lib/drafts"
 import { cn } from "@/lib/utils"
 import { CodeEditor } from "./code-editor"
 import { ConflictDialog } from "./conflict-dialog"
@@ -40,96 +52,65 @@ export interface DocumentEditorProps {
   onDirtyChange?: (dirty: boolean) => void
 }
 
-interface Stash {
-  key: string
-  base: FileContent
-  draft: string
-}
-
 /**
- * The unsaved draft of the open editor, kept outside React so it survives a
- * remount: crossing the 768px breakpoint (a phone rotating) swaps the phone
- * stack for the desktop panels, and the new editor renders before the old
- * one unmounts. A leave through the guard clears the dirty flag first, so
- * the unmount drops discarded edits.
- */
-let stash: Stash | null = null
-
-/**
- * Editor for one file. Mount it with a key per file: it keeps the draft and
- * the version it was loaded from.
+ * Editor for one file. Mount it with a key per file. The draft, the version
+ * it is based on and a running save live in the draft store (lib/drafts.ts),
+ * keyed by draftKey, so they survive a remount: crossing the 768px
+ * breakpoint swaps the phone screens for the desktop panels, and the new
+ * editor can mount before the old one unmounts, or while its save runs.
  */
 export default function DocumentEditor(props: DocumentEditorProps) {
   const { draftKey, path, title, file, readOnlyReason, warning, meta, validate } = props
-  const [restored] = useState(() => (stash?.key === draftKey ? stash : null))
-  const [base, setBase] = useState(restored?.base ?? file)
-  const [draft, setDraft] = useState(restored?.draft ?? file.content)
-  const [seen, setSeen] = useState(file)
-  const [saving, setSaving] = useState(false)
-  const [conflict, setConflict] = useState(false)
+  const [opened] = useState(() => openDraft(draftKey, file))
+  const doc = useSyncExternalStore(subscribeDrafts, () => getDraft(draftKey)) ?? opened
+  const { content: draft, conflict } = doc
+  const saving = !!doc.saving
   const [mode, setMode] = useViewMode()
   const isDesktop = useIsDesktop()
-  const dirty = draft !== base.content
+  const dirty = isDraftDirty(doc)
   const markdown = isMarkdownPath(path)
   const viewMode = !markdown ? "edit" : mode === "split" && !isDesktop ? "edit" : mode
   const preview = useDeferredValue(draft)
 
+  useEffect(
+    () => retainDraft(draftKey, file),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- file only seeds a forgotten clean doc
+    [draftKey]
+  )
   // A refetch brought a newer version: take it while there is nothing to lose.
-  if (seen !== file) {
-    setSeen(file)
-    if (!dirty && file.hash !== base.hash) {
-      setBase(file)
-      setDraft(file.content)
-    }
-  }
+  useEffect(() => rebaseDraft(draftKey, file, { keepDraft: true }), [draftKey, file])
 
   const dirtyCallback = useRef(props.onDirtyChange)
   useEffect(() => {
     dirtyCallback.current = props.onDirtyChange
   })
   useEffect(() => {
-    setDirty(dirty)
     dirtyCallback.current?.(dirty)
   }, [dirty])
-  useEffect(() => {
-    if (dirty) stash = { key: draftKey, base, draft }
-    else if (stash?.key === draftKey) stash = null
-  }, [dirty, base, draft, draftKey])
-  useEffect(
-    () => () => {
-      // Still dirty here: unmounted without a leave (a layout switch). Keep it.
-      if (!isDirty() && stash?.key === draftKey) stash = null
-      setDirty(false)
-      dirtyCallback.current?.(false)
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount only
-    []
-  )
+  useEffect(() => () => dirtyCallback.current?.(false), [])
 
   const save = async (force = false) => {
-    if (!props.onSave || readOnlyReason || saving) return
-    if (!dirty && !force) return
-    const content = draft
-    setSaving(true)
+    if (!props.onSave || readOnlyReason) return
+    const current = getDraft(draftKey)
+    if (!current || current.saving || (!isDraftDirty(current) && !force)) return
+    const start = beginSave(draftKey)
+    if (!start) return
     try {
-      const result = await props.onSave(content, { baseHash: base.hash, force })
-      setBase({ content, mtimeMs: result.mtimeMs, hash: result.hash })
+      const result = await props.onSave(start.content, { baseHash: start.baseHash, force })
+      // Lands in the store, so an editor that replaced this one sees it too.
+      finishSave(draftKey, start, result)
       toast.success(`Saved ${title}`)
     } catch (error) {
-      if (isConflict(error)) setConflict(true)
-      else toast.error(`Could not save ${title}`, { description: errorMessage(error) })
-    } finally {
-      setSaving(false)
+      failSave(draftKey, start, { conflict: isConflict(error) })
+      if (!isConflict(error)) toast.error(`Could not save ${title}`, { description: errorMessage(error) })
     }
   }
 
   const reload = async () => {
-    setConflict(false)
+    setDraftConflict(draftKey, false)
     try {
       const fresh = await props.onReload()
-      if (!fresh) return
-      setBase(fresh)
-      setDraft(fresh.content)
+      if (fresh) rebaseDraft(draftKey, fresh)
     } catch (error) {
       toast.error(`Could not reload ${title}`, { description: errorMessage(error) })
     }
@@ -169,7 +150,7 @@ export default function DocumentEditor(props: DocumentEditorProps) {
         {/* Hidden, not unmounted, in preview: the view keeps its undo history. */}
         <CodeEditor
           value={draft}
-          onChange={setDraft}
+          onChange={(text) => editDraft(draftKey, text)}
           readOnly={!!readOnlyReason}
           path={path}
           ariaLabel={`${title} editor`}
@@ -188,10 +169,10 @@ export default function DocumentEditor(props: DocumentEditorProps) {
       <ConflictDialog
         open={conflict}
         fileName={title}
-        onCancel={() => setConflict(false)}
+        onCancel={() => setDraftConflict(draftKey, false)}
         onReload={() => void reload()}
         onOverwrite={() => {
-          setConflict(false)
+          setDraftConflict(draftKey, false)
           void save(true)
         }}
       />

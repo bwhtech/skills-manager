@@ -7,6 +7,11 @@ import { api, errorMessage, keys, useInstruction } from "@/lib/api"
 import { EditorSkeleton } from "@/features/skills/skill-file-editor"
 import { LinkedBadge } from "./linked-badge"
 
+/** The draft store key of an instruction file (lib/drafts.ts). */
+export function instructionDraftKey(fileId: string) {
+  return `doc:${fileId}`
+}
+
 interface InstructionEditorProps {
   file: InstructionFile
   onDirtyChange?: (dirty: boolean) => void
@@ -38,7 +43,7 @@ export function InstructionEditor({ file, onDirtyChange }: InstructionEditorProp
     <Suspense fallback={<EditorSkeleton />}>
       <DocumentEditor
         key={file.id}
-        draftKey={`doc:${file.id}`}
+        draftKey={instructionDraftKey(file.id)}
         path={file.path}
         title={file.fileName}
         file={content.data}

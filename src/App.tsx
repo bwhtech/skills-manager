@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { lazy, Suspense, useEffect, useState } from "react"
 import { QueryClientProvider } from "@tanstack/react-query"
 import { UnsavedChangesDialog } from "@/components/editor"
 import { AppHeader } from "@/components/layout/app-header"
@@ -15,7 +15,11 @@ import { useVisualViewportHeight } from "@/hooks/use-visual-viewport"
 import { usePlace } from "@/lib/hash-state"
 import { isMod, useWindowKeydown } from "@/lib/hotkeys"
 import { queryClient } from "@/lib/query-client"
-import { ui } from "@/lib/ui-store"
+import { ui, useUi } from "@/lib/ui-store"
+
+const UpdateAllDialog = lazy(() =>
+  import("@/features/updates/update-all-dialog").then((module) => ({ default: module.UpdateAllDialog }))
+)
 
 const WIDE = "(min-width: 1024px)"
 
@@ -53,6 +57,18 @@ function Header() {
   const isDesktop = useIsDesktop()
   const pushed = place.tab === "skills" ? !!place.skill : !!place.doc
   return isDesktop || !pushed ? <AppHeader /> : null
+}
+
+/** The Update all dialog loads on first open, then stays mounted so it can animate out. */
+function UpdateAllDialogSlot() {
+  const { updateAllScope } = useUi()
+  const [used, setUsed] = useState(false)
+  if (updateAllScope && !used) setUsed(true)
+  return used ? (
+    <Suspense fallback={null}>
+      <UpdateAllDialog />
+    </Suspense>
+  ) : null
 }
 
 /** Phones: toasts at the top, under the notch, clear of the editor toolbar and the jobs log. */
@@ -98,6 +114,7 @@ export function App() {
         </SidebarProvider>
         <JobsSheet />
         <InstallDialog />
+        <UpdateAllDialogSlot />
         <UnsavedChangesDialog />
         <AppToaster />
       </TooltipProvider>

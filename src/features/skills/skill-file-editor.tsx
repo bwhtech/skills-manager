@@ -5,11 +5,17 @@ import { DocumentEditor, type SaveOptions } from "@/components/editor"
 import { validateSkillMd } from "@/components/editor/frontmatter"
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api, errorMessage, keys, useSkillFile } from "@/lib/api"
+import { api, errorMessage, keys, resetUpdatePreviews, useSkillFile } from "@/lib/api"
 import { basename } from "@/lib/format"
+import { OVERWRITE_WARNING } from "@/features/updates/copy"
 import { skillReadOnlyReason } from "./read-only-reason"
 
 export const SKILL_MD = "SKILL.md"
+
+/** The draft store key of a file in a skill (lib/drafts.ts). */
+export function skillDraftKey(skillId: string, path: string) {
+  return `skill:${skillId}:${path}`
+}
 
 interface SkillFileEditorProps {
   skill: SkillDetail
@@ -39,6 +45,8 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
     void client.invalidateQueries({ queryKey: keys.skill(skill.id) })
     // The skill can be listed in several scopes; refresh every list.
     void client.invalidateQueries({ queryKey: ["skills"] })
+    // The update preview diffs against the folder on disk.
+    resetUpdatePreviews(client, [skill.id])
     return result
   }
 
@@ -54,12 +62,12 @@ function SkillMdEditor({ skill, onDirtyChange }: Omit<SkillFileEditorProps, "pat
   return (
     <DocumentEditor
       key={skill.id}
-      draftKey={`skill:${skill.id}:${SKILL_MD}`}
+      draftKey={skillDraftKey(skill.id, SKILL_MD)}
       path={SKILL_MD}
       title={SKILL_MD}
       file={skill.skillMd}
       readOnlyReason={skillReadOnlyReason(skill)}
-      warning={skill.origin === "npx" ? "Update overwrites local edits." : undefined}
+      warning={skill.origin === "npx" ? OVERWRITE_WARNING : undefined}
       validate={validate}
       onSave={skill.editable ? save : undefined}
       onReload={reload}
@@ -84,7 +92,7 @@ function OtherFileViewer({ skill, path }: { skill: SkillDetail; path: string }) 
   return (
     <DocumentEditor
       key={`${skill.id}:${path}`}
-      draftKey={`skill:${skill.id}:${path}`}
+      draftKey={skillDraftKey(skill.id, path)}
       path={path}
       title={path}
       file={file.data}
