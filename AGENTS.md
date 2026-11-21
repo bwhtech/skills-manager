@@ -25,6 +25,10 @@ to install, update and remove skills.
 ## Production
 
 - systemd user unit `skills-manager` (`~/.config/systemd/user/skills-manager.service`).
+- Production runs from its own checkout, `/mnt/data/skills-manager-live` (a detached git worktree),
+  never from this development checkout. Deploy a committed revision with `scripts/deploy.sh [rev]`
+  (default `main`): it checks out the revision, builds into `dist.next`, swaps it in, and restarts
+  the unit. Local `bun run build` here only affects this checkout.
 - Listens on `127.0.0.1:3530`. Tailnet only: `https://hussain-coding.tail5c9b7d.ts.net:8466`
   through Tailscale Serve. No login: the tailnet is the access control.
 - App state (pinned projects, scan cache): `~/.config/skills-manager/state.json`.
