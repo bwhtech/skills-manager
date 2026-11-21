@@ -28,10 +28,13 @@ function fakeCli(exitCode = 0) {
   }
 }
 
+/** No lock file: tests never read the real ~/.agents/.skill-lock.json. */
+const emptyLock = async () => ({ skills: new Map(), lastSelectedAgents: [] })
+
 function setup(exitCode = 0, hooks = {}) {
   const fake = fakeCli(exitCode)
   const jobs = new JobManager()
-  const actions = new SkillActions(fake.cli, jobs, hooks)
+  const actions = new SkillActions(fake.cli, jobs, hooks, null, emptyLock)
   return { ...fake, jobs, actions }
 }
 
@@ -109,8 +112,8 @@ describe("overlapping update jobs", () => {
     failed.actions.update({ scope: "/p", names: [] })
     await failed.release()
     expect(calls).toEqual([
-      ["user", ["foo"], true, ""],
-      ["/p", [], false, ""],
+      ["user", ["foo"], { ok: true, failed: [], blocksRemoval: null }, ""],
+      ["/p", [], { ok: false, failed: [], blocksRemoval: "the update exited with 1" }, ""],
     ])
   })
 
@@ -144,7 +147,7 @@ describe("UpdateChecker.markUpdated", () => {
         ),
     } as unknown as SkillsCli
     const projects = { paths: () => [] } as unknown as ProjectService
-    const updates = new UpdateChecker(cli, projects)
+    const updates = new UpdateChecker(cli, projects, emptyLock)
     const finishCheck = async () => {
       while (pending.length === 0) await Bun.sleep(1)
       pending.shift()!()

@@ -1,7 +1,11 @@
 import { lstat, realpath } from "node:fs/promises"
 import { join } from "node:path"
 import type { ScopeKey, UpdatePreview } from "../../shared/api.ts"
-import { readGlobalLock, readProjectLock } from "../discovery/locks.ts"
+import {
+  readGlobalLock,
+  readProjectLock,
+  type LockEntry,
+} from "../discovery/locks.ts"
 import type { IndexedSkill } from "../discovery/skill-index.ts"
 import { HttpError, badRequest } from "../lib/errors.ts"
 import { isInside } from "../lib/files.ts"
@@ -86,6 +90,31 @@ export class UpdatePreviewService {
     }
   }
 
+  /**
+   * Whether `skills update` would find the locked skill upstream now, by the CLI's rules
+   * (see findSkill). Always fetches the source anew: never from the cache. Throws when the
+   * source cannot be fetched or the entry cannot be checked (HttpError 400/413/502/504).
+   */
+  async upstreamState(
+    scope: ScopeKey,
+    lockName: string,
+    entry: LockEntry
+  ): Promise<UpstreamState> {
+    const plan = planUpdate(entry, lockName, scope === "user")
+    const lease = await this.cache.acquire(plan.spec, { fresh: true })
+    try {
+      await findSkill(lease.checkout, plan)
+      return "present"
+    } catch (err) {
+      if (err instanceof HttpError && err.message === "not_upstream") return "deleted"
+      if (err instanceof HttpError && err.message === "ambiguous_upstream")
+        return "ambiguous"
+      throw err
+    } finally {
+      lease.release()
+    }
+  }
+
   /** After an update job: drop the sources those skills were previewed from. */
   invalidate(scope: ScopeKey, names: string[]): void {
     const prefix = usedKey(scope, "")
@@ -116,6 +145,9 @@ export class UpdatePreviewService {
     }
   }
 }
+
+/** What a fresh fetch says about a locked skill. */
+export type UpstreamState = "present" | "deleted" | "ambiguous"
 
 /** The upstream skill folder, materialized, and its SKILL.md text. */
 export interface UpstreamSkill {

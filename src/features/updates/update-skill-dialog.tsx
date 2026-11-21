@@ -18,7 +18,7 @@ import {
   useUpdates,
 } from "@/lib/api"
 import { plural, scopeLabel } from "@/lib/format"
-import { ambiguousInScope, cliNameOf, cliSourceOf, deletedInScope, sameSource } from "@/lib/upstream"
+import { ambiguousInScope, cliNameOf, cliSourceOf, deletedInScope, removalPlanFor, sameSource } from "@/lib/upstream"
 import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
 import { DiffLayoutToggle, FileChangeList, preloadDiffView } from "./file-changes"
@@ -68,8 +68,10 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
     (item) => sameSource(item, skill) && item.name.toLowerCase() !== cliName.toLowerCase()
   )
   const deletedItems = selfDeleted ? [self, ...sameSourceDeleted] : sameSourceDeleted
-  const choices = useDeletedChoices(deletedItems, (name) =>
-    isBeingUpdated(runningTargets, skill.scope, name) ? "Running…" : null
+  const choices = useDeletedChoices(
+    deletedItems,
+    (name) => removalPlanFor(status, skill.scope, name),
+    (name) => (isBeingUpdated(runningTargets, skill.scope, name) ? "Running…" : null)
   )
   const remove = choices.selected
   const ambiguous = ambiguousInScope(status, skill.scope).filter((item) => sameSource(item, skill))
@@ -77,7 +79,11 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
   const confirm = () =>
     update.mutate(
       // names empty + remove: the job only removes.
-      { scope: skill.scope, names: selfDeleted ? [] : [cliName], ...(remove.length ? { remove } : {}) },
+      {
+        scope: skill.scope,
+        names: selfDeleted ? [] : [cliName],
+        ...(remove.length ? { remove, removePlans: choices.removePlans } : {}),
+      },
       {
         onSuccess: ({ jobId }) => {
           onOpenChange(false)
@@ -110,14 +116,16 @@ export function UpdateSkillDialog({ skill, open, onOpenChange }: UpdateSkillDial
               ? "An update of this skill is running. Wait for it to finish."
               : remove.length
                 ? `Runs skills remove for ${remove.length > 2 ? plural(remove.length, "skill") : remove.join(", ")}.`
-                : "Nothing selected: every skill is kept."}
+                : choices.dropped.some((d) => d.item.name === cliName)
+                  ? "Not offered for removal: see the reason above."
+                  : "Nothing selected: every skill is kept."}
           </p>
           <Button ref={cancelRef} variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
           <Button variant="destructive" disabled={remove.length === 0 || update.isPending || running} onClick={confirm}>
             {update.isPending || running ? <Spinner /> : <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />}
-            {running ? "Running…" : confirmLabel(0, remove.length)}
+            {running ? "Running…" : remove.length ? confirmLabel(0, remove.length) : "Remove"}
           </Button>
         </UpdateDialogFooter>
       </UpdateDialogShell>

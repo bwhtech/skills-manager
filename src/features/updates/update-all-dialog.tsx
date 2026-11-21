@@ -23,7 +23,7 @@ import {
 } from "@/lib/api"
 import { plural, scopeLabel } from "@/lib/format"
 import { ui, useUi } from "@/lib/ui-store"
-import { ambiguousInScope, deletedInScope, skillForCliName } from "@/lib/upstream"
+import { ambiguousInScope, deletedInScope, removalPlanFor, skillForCliName } from "@/lib/upstream"
 import { cn } from "@/lib/utils"
 import { showJob } from "@/features/jobs/job-store"
 import { AmbiguousUpstreamNote, confirmLabel, DeletedUpstreamSection, useDeletedChoices } from "./deleted-upstream"
@@ -91,8 +91,11 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
   const [choices, setChoices] = useState<ReadonlyMap<string, boolean>>(new Map())
   const run = useJobMutation(api.runUpdate)
   const running = useRunningUpdates()
-  const deletedChoices = useDeletedChoices(deleted, (name) =>
-    isBeingUpdated(running, scope, name) ? "Running…" : null
+  const status = useUpdates().data
+  const deletedChoices = useDeletedChoices(
+    deleted,
+    (name) => removalPlanFor(status, scope, name),
+    (name) => (isBeingUpdated(running, scope, name) ? "Running…" : null)
   )
   const remove = deletedChoices.selected
 
@@ -141,7 +144,7 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
     if (names.length === 0 && remove.length === 0) return
     run.mutate(
       // names empty + remove: the job only removes.
-      { scope, names, ...(remove.length ? { remove } : {}) },
+      { scope, names, ...(remove.length ? { remove, removePlans: deletedChoices.removePlans } : {}) },
       {
         onSuccess: ({ jobId }) => {
           ui.closeUpdateAll()
@@ -158,8 +161,10 @@ function UpdateAllForm({ scope, cancelRef }: { scope: ScopeKey; cancelRef: RefOb
         title={
           rows.length
             ? `Update ${plural(rows.length, "skill")} in ${scopeName}?`
-            : deleted.length
-              ? `Remove ${plural(deleted.length, "deleted skill")} in ${scopeName}?`
+            : deletedChoices.items.length
+              ? `Remove ${plural(deletedChoices.items.length, "deleted skill")} in ${scopeName}?`
+              : deleted.length
+                ? `Deleted upstream skills in ${scopeName}`
               : `Update skills in ${scopeName}`
         }
         description={

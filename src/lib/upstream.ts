@@ -1,4 +1,4 @@
-import type { ScopeKey, SkillSummary, UpdateStatus, UpstreamSkillRef } from "@shared/api"
+import type { RemovalPlan, ScopeKey, SkillSummary, UpdateStatus, UpstreamSkillRef } from "@shared/api"
 
 /**
  * The name the skills CLI tracks: what update, remove, preview and the running-job
@@ -47,4 +47,9 @@ export function groupBySource<T extends { source: string }>(items: T[]): { sourc
   const groups = new Map<string, T[]>()
   for (const item of items) groups.set(item.source, [...(groups.get(item.source) ?? []), item])
   return [...groups].map(([source, list]) => ({ source, items: list }))
+}
+
+/** The server's removal plan for a deleted-upstream skill, if it sent one. */
+export function removalPlanFor(status: UpdateStatus | undefined, scope: ScopeKey, name: string): RemovalPlan | null {
+  return (status?.removalPlans ?? []).find((plan) => plan.scope === scope && plan.name === name) ?? null
 }

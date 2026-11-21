@@ -33,6 +33,11 @@ const FAILURES: [RegExp, (m: RegExpExecArray) => CheckFailure][] = [
     (m) => ({ name: m[1], reason: "could not fetch or read the source" }),
   ],
   [/^✗ Cannot update (\S+): (.+)$/, (m) => ({ name: m[1], reason: m[2] })],
+  // reportInstall in `skills update`: the skill name, sanitized for display.
+  [
+    /^✗ Failed to update (.+?)(?:: (.+))?$/,
+    (m) => ({ name: m[1], reason: m[2] ?? "update failed" }),
+  ],
   [/^✗ (.+)$/, (m) => ({ name: m[1], reason: "check failed" })],
   [/^Error: (.+)$/, (m) => ({ name: "skills check", reason: m[1] })],
 ]

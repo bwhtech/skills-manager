@@ -89,9 +89,15 @@ export class SourceCache {
     await mkdir(this.options.root, { recursive: true, mode: 0o700 })
   }
 
-  async acquire(spec: SourceSpec): Promise<Lease> {
+  /**
+   * A lease on the source. `fresh` skips the cache and any fetch in flight: it fetches anew
+   * and the result replaces the cached entry.
+   */
+  async acquire(spec: SourceSpec, { fresh = false } = {}): Promise<Lease> {
     const key = cacheKey(spec)
-    const entry = this.entries.get(key) ?? (await this.fetchShared(key, spec))
+    const entry = fresh
+      ? await this.fetchFresh(key, spec)
+      : (this.entries.get(key) ?? (await this.fetchShared(key, spec)))
     entry.users++
     let released = false
     return {
@@ -134,6 +140,18 @@ export class SourceCache {
     }
     fetching.then(clear, clear)
     return fetching
+  }
+
+  private async fetchFresh(key: string, spec: SourceSpec): Promise<Entry> {
+    const previous = this.entries.get(key)
+    const entry = await this.slots.run(() => this.fetch(key, spec))
+    if (previous && previous !== entry) {
+      // fetch() already put the new entry in the map; let the old one go once unused.
+      previous.expired = true
+      clearTimeout(previous.timer)
+      if (previous.users === 0) void this.dispose(previous)
+    }
+    return entry
   }
 
   private async fetch(key: string, spec: SourceSpec): Promise<Entry> {

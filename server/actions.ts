@@ -10,6 +10,7 @@ import {
 import { parseCheckOutput } from "./cli/parsers.ts"
 import type { SkillsCli } from "./cli/skills-cli.ts"
 import { config } from "./config.ts"
+import { readScopeLock, type LockReader, type SkillLock } from "./discovery/locks.ts"
 import {
   isRemovable,
   type IndexedSkill,
@@ -19,6 +20,18 @@ import { cleanLine } from "./lib/ansi.ts"
 import { forbidden, HttpError } from "./lib/errors.ts"
 import { isInside, realpathOrNull } from "./lib/files.ts"
 import type { JobLog, JobManager } from "./jobs.ts"
+import type { RemovalGuard } from "./removal/guard.ts"
+import type { PlannedRemoval } from "./removal/plan.ts"
+
+/** How an update step went. */
+export interface UpdateOutcome {
+  /** false: a failure that could not be pinned to skills; prune nothing */
+  ok: boolean
+  /** lock keys whose update or source failed: their `available` entries stay */
+  failed: string[]
+  /** why step 2 must not run, else null */
+  blocksRemoval: string | null
+}
 
 export interface ActionHooks {
   /**
@@ -28,19 +41,28 @@ export interface ActionHooks {
   afterUpdate?: (
     scope: string,
     names: string[],
-    succeeded: boolean,
+    outcome: UpdateOutcome,
     output: string
   ) => void
-  /** after a `skills remove` of npx skills (CLI names), whatever the outcome */
-  afterRemove?: (scope: string, names: string[], succeeded: boolean) => void
+  /**
+   * after a remove of npx skills (CLI names), whatever the outcome: `removed` are the names
+   * verified gone from the disk and the lock file; `attempted` every name the job was for
+   */
+  afterRemove?: (scope: string, removed: string[], attempted: string[]) => void
 }
 
 export interface UpdateJobRequest {
   scope: string
   /** empty = every skill in the scope, or none when `remove` is set */
   names: string[]
-  /** deleted-upstream CLI names to remove after the update (the caller validated them) */
-  remove?: string[]
+  /**
+   * deleted-upstream removals, authorized by RemovalGuard.authorize: their plans at request
+   * time, and the willDelete lists the dialog showed
+   */
+  remove?: {
+    plans: PlannedRemoval[]
+    shown: ReadonlyMap<string, readonly string[]>
+  }
 }
 
 interface StepResult {
@@ -53,7 +75,9 @@ export class SkillActions {
   constructor(
     private readonly cli: SkillsCli,
     private readonly jobs: JobManager,
-    private readonly hooks: ActionHooks = {}
+    private readonly hooks: ActionHooks = {},
+    private readonly guard: RemovalGuard | null = null,
+    private readonly readLock: LockReader = readScopeLock
   ) {}
 
   install(req: InstallRequest): Job {
@@ -78,13 +102,19 @@ export class SkillActions {
 
   /**
    * `skills update`, then (with `remove`) `skills remove` for deleted-upstream skills, as two
-   * steps of one job. The remove step is skipped when the update step fails. With `remove`
-   * and no names, only the remove step runs. 409 update_in_progress when a queued or running
-   * update job overlaps.
+   * steps of one job. Step 2 runs only when step 1 printed no failure (whatever its exit
+   * code), and then only for names the guard confirms again right before (fresh upstream
+   * fetch, unchanged lock entry, plan within what the dialog showed). Afterwards the disk and
+   * the lock file are checked. With `remove` and no names, only step 2 runs. 409
+   * update_in_progress when a queued or running update job overlaps.
    */
   update(req: UpdateJobRequest): Job {
     const { scope } = req
-    const remove = [...new Set(req.remove ?? [])]
+    const plans = req.remove?.plans ?? []
+    const shown = req.remove?.shown ?? new Map()
+    const remove = plans.map((p) => p.name)
+    if (remove.length && !this.guard)
+      throw new HttpError(500, "internal", "Removal is not available")
     const removeOnly = req.names.length === 0 && remove.length > 0
     const names = removeOnly ? [] : req.names
     const target: UpdateTarget = {
@@ -106,29 +136,35 @@ export class SkillActions {
         { jobId: busy.id }
       )
     const updateArgs = ["update", ...names, scope === "user" ? "-g" : "-p", "-y"]
-    const removeArgs = removeArgsFor(scope, remove)
-    const steps = [
-      ...(removeOnly ? [] : [updateArgs]),
-      ...(remove.length ? [removeArgs] : []),
-    ]
+    const planned = groupPlans(plans).map((g) =>
+      removeArgsFor(scope, g.plans.map((p) => p.name), g.agents)
+    )
+    const steps = [...(removeOnly ? [] : [updateArgs]), ...planned]
     const cwd = scopeCwd(scope)
     let updated: StepResult | null = null
-    let removed: StepResult | null = null
+    let outcome: UpdateOutcome | null = null
+    let removed: string[] = []
 
     const run = async (log: JobLog): Promise<number> => {
       if (!removeOnly) {
-        if (steps.length > 1) log(`Step 1 of 2: ${this.cli.display(updateArgs)}`)
-        updated = await this.runStep(updateArgs, cwd, log)
-        if (!remove.length) return updated.code
-        if (!updateSucceeded(updated)) {
-          log("Step 2 of 2 skipped: the update failed, so nothing was removed.")
-          return updated.code || 1
+        if (remove.length) log(`Step 1 of 2: ${this.cli.display(updateArgs)}`)
+        const step = await this.runStep(updateArgs, cwd, log)
+        updated = step
+        const lock = await this.readLock(scope).catch(() => null)
+        outcome = assessUpdate(step, lock)
+        // A printed failure fails the job even when the CLI exits 0.
+        if (!remove.length) return outcome.blocksRemoval ? step.code || 1 : step.code
+        if (outcome.blocksRemoval) {
+          log(`Step 2 of 2 skipped: ${outcome.blocksRemoval}, so nothing was removed.`)
+          return step.code || 1
         }
         log("")
-        log(`Step 2 of 2: ${this.cli.display(removeArgs)}`)
+        log("Step 2 of 2: remove the deleted-upstream skills")
       }
-      removed = await this.runStep(removeArgs, cwd, log)
-      return removeSucceeded(removed) ? 0 : removed.code || 1
+      const guard = this.guard as RemovalGuard
+      const result = await this.removeConfirmed(guard, scope, remove, shown, cwd, log)
+      removed = result.removed
+      return result.ok ? 0 : 1
     }
 
     const what = names.length ? names.join(", ") : "all skills"
@@ -147,12 +183,54 @@ export class SkillActions {
       run,
       onDone: () => {
         const u = updated as StepResult | null
-        const r = removed as StepResult | null
-        if (u) this.hooks.afterUpdate?.(scope, names, updateSucceeded(u), u.output)
-        if (remove.length)
-          this.hooks.afterRemove?.(scope, remove, !!r && removeSucceeded(r))
+        if (u) {
+          const o = (outcome as UpdateOutcome | null) ?? {
+            ok: false,
+            failed: [],
+            blocksRemoval: "the update did not finish",
+          }
+          this.hooks.afterUpdate?.(scope, names, o, u.output)
+        }
+        if (remove.length) this.hooks.afterRemove?.(scope, removed, remove)
       },
     })
+  }
+
+  /**
+   * Step 2: confirm each name again (guard.prepare), run `skills remove` once per set of
+   * agents, then check the disk and the lock file (guard.verify).
+   */
+  private async removeConfirmed(
+    guard: RemovalGuard,
+    scope: string,
+    names: string[],
+    shown: ReadonlyMap<string, readonly string[]>,
+    cwd: string,
+    log: JobLog
+  ): Promise<{ ok: boolean; removed: string[] }> {
+    let prepared
+    try {
+      prepared = await guard.prepare(scope, names, shown, log)
+    } catch (err) {
+      log(`Nothing removed: ${(err as Error).message}`)
+      return { ok: false, removed: [] }
+    }
+    const removed: string[] = []
+    let ok = prepared.failed.length === 0
+    for (const group of prepared.groups) {
+      const args = removeArgsFor(scope, group.plans.map((p) => p.name), group.agents)
+      log(`$ ${this.cli.display(args)}`)
+      const step = await this.runStep(args, cwd, log)
+      const verified = await guard.verify(scope, group.plans, step.output, step.code)
+      removed.push(...verified.removed)
+      for (const item of verified.incomplete) {
+        ok = false
+        log(`Incomplete removal of ${item.name}: ${item.problems.join("; ")}`)
+      }
+    }
+    if (prepared.groups.length === 0) log("Nothing was removed.")
+    else if (removed.length) log(`Removed and verified: ${removed.join(", ")}`)
+    return { ok, removed }
   }
 
   /** Runs one CLI step into the job log, and keeps its output. */
@@ -175,27 +253,48 @@ export class SkillActions {
     return { code: timedOut ? exitCode || 1 : exitCode, output: lines.join("\n") }
   }
 
-  remove(skill: IndexedSkill): Job {
+  /**
+   * Remove one skill. npx skills: `skills remove` with -a limited by the plan (independent
+   * same-named copies stay), refused (409) when the plan is blocked, and checked on disk
+   * afterwards. `plan` comes from RemovalGuard.plans at request time.
+   */
+  remove(skill: IndexedSkill, plan?: PlannedRemoval): Job {
     if (skill.origin === "npx") {
-      const args = removeArgsFor(skill.scope, [skill.cliName])
+      if (!plan || !this.guard)
+        throw new HttpError(500, "internal", "Removal is not available")
+      if (plan.blocked)
+        throw new HttpError(
+          409,
+          plan.blockCode === "collision" ? "removal_conflict" : "removal_blocked",
+          plan.blocked
+        )
+      const guard = this.guard
+      const args = removeArgsFor(skill.scope, [skill.cliName], plan.agents)
       const cwd = scopeCwd(skill.scope)
-      let result: StepResult | null = null
+      let removed: string[] = []
       return this.jobs.enqueue({
         kind: "remove",
         title: `Remove ${skill.cliName} (${scopeLabel(skill.scope)})`,
         command: this.cli.display(args),
         cwd,
         run: async (log) => {
-          result = await this.runStep(args, cwd, log)
-          return removeSucceeded(result) ? 0 : result.code || 1
+          // The disk may have changed since the request: plan again, never wider.
+          const [now] = await guard.plans(skill.scope, [skill.cliName])
+          const extra = now.willDelete.filter((p) => !plan.willDelete.includes(p))
+          if (now.blocked || extra.length || now.agents.join(" ") !== plan.agents.join(" ")) {
+            log(`Nothing removed: ${now.blocked ?? `what would be deleted changed (${extra.join(", ") || "other agents"})`}`)
+            return 1
+          }
+          for (const k of now.kept) log(`Kept: ${k.reason} at ${k.path}`)
+          const step = await this.runStep(args, cwd, log)
+          const verified = await guard.verify(skill.scope, [now], step.output, step.code)
+          removed = verified.removed
+          for (const item of verified.incomplete)
+            log(`Incomplete removal of ${item.name}: ${item.problems.join("; ")}`)
+          return verified.incomplete.length ? 1 : 0
         },
         onDone: () => {
-          const r = result as StepResult | null
-          this.hooks.afterRemove?.(
-            skill.scope,
-            [skill.cliName],
-            !!r && removeSucceeded(r)
-          )
+          this.hooks.afterRemove?.(skill.scope, removed, [skill.cliName])
         },
       })
     }
@@ -235,26 +334,79 @@ function scopeCwd(scope: string): string {
   return scope === "user" ? config.home : scope
 }
 
-function removeArgsFor(scope: string, names: string[]): string[] {
-  const args = ["remove", "-s", ...names, "-y"]
+function groupPlans(plans: PlannedRemoval[]): { agents: string[]; plans: PlannedRemoval[] }[] {
+  const groups = new Map<string, { agents: string[]; plans: PlannedRemoval[] }>()
+  for (const plan of plans) {
+    const key = plan.agents.join(" ")
+    const group = groups.get(key) ?? { agents: plan.agents, plans: [] }
+    group.plans.push(plan)
+    groups.set(key, group)
+  }
+  return [...groups.values()]
+}
+
+function removeArgsFor(scope: string, names: string[], agents: string[]): string[] {
+  const args = ["remove", "-s", ...names, "-a", ...agents, "-y"]
   if (scope === "user") args.push("-g")
   return args
 }
 
 /**
- * `skills update` exits 1 when a skill failed. A skill that is gone from its download
- * ("is no longer in this download") counts as failed too; when those are the only
- * failures, the update itself went fine and removing them is what fixes it.
+ * How `skills update` went, from its output whatever the exit code: it prints
+ * "✗ Failed to check skills from <source>" and still exits 0 when a source cannot be
+ * fetched. A skill gone from its download ("is no longer in this download") counts as
+ * failed in the CLI; here it is deleted upstream, not a failure.
+ *
+ * - Each failure line is pinned to lock keys: a source (source or sourceUrl) names every
+ *   key from it, a skill name names that key. Those keys stay in `available`.
+ * - A failure that cannot be pinned, a timeout, an exit code other than 0 or 1, or exit 1
+ *   without a line that explains it: ok false, nothing is pruned.
+ * - Any failure at all blocks step 2: the sources the job touched did not all check out.
  */
-export function updateSucceeded({ code, output }: StepResult): boolean {
-  if (code === 0) return true
-  if (code !== 1) return false
+export function assessUpdate(
+  { code, output }: StepResult,
+  lock: SkillLock | null
+): UpdateOutcome {
   const report = parseCheckOutput(output)
-  return (
-    report.goneFromDownload > 0 &&
-    report.failCount === report.goneFromDownload &&
-    report.failures.length === 0
-  )
+  const failed = new Set<string>()
+  const named = new Set<string>()
+  let unpinned = false
+  for (const failure of report.failures) {
+    const keys = keysFor(failure.name, lock)
+    if (keys.length === 0) unpinned = true
+    named.add(failure.name)
+    for (const key of keys) failed.add(key)
+  }
+  const countOnly = report.failCount - report.goneFromDownload > 0 && report.failures.length === 0
+  const exitUnexplained =
+    code !== 0 &&
+    !(code === 1 && (report.failures.length > 0 || report.goneFromDownload > 0))
+  if (unpinned || countOnly || exitUnexplained || (code !== 0 && code !== 1)) {
+    return {
+      ok: false,
+      failed: [...failed],
+      blocksRemoval: exitUnexplained || code > 1 ? `the update exited with ${code}` : "the update reported a failure",
+    }
+  }
+  return {
+    ok: true,
+    failed: [...failed],
+    blocksRemoval: failed.size ? `the update could not check ${[...named].join(", ")}` : null,
+  }
+}
+
+/** Lock keys a CLI failure line names: by source, sourceUrl or the key itself. */
+function keysFor(name: string, lock: SkillLock | null): string[] {
+  if (!lock) return []
+  const keys: string[] = []
+  for (const [key, entry] of lock.skills)
+    if (key === name || entry.source === name || entry.sourceUrl === name) keys.push(key)
+  return keys
+}
+
+/** @deprecated kept for callers that only need a yes/no; see assessUpdate. */
+export function updateSucceeded(step: StepResult, lock: SkillLock | null = null): boolean {
+  return assessUpdate(step, lock).blocksRemoval === null
 }
 
 // `skills remove` exits 0 even when it removed nothing (skills 1.9.0 removeCommand).
@@ -262,6 +414,7 @@ const REMOVE_FAILED = [
   /Failed to remove \d+ skill\(s\)/,
   /No matching skills found for/,
   /No skills found to remove/,
+  /Could not remove skill from /,
 ]
 
 export function removeSucceeded({ code, output }: StepResult): boolean {

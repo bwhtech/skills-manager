@@ -64,13 +64,16 @@ export function skillRoutes(svc: Services): Hono {
     const skill = await lookup(c.req.param("id"))
     try {
       const body: UpdatePreview = await svc.previews.preview(skill)
+      // Found upstream: an earlier "deleted" finding for it is stale.
+      svc.updates.notePresent(skill.scope, skill.cliName)
       return c.json(body)
     } catch (err) {
       // The preview mirrors how `skills update` finds the skill: gone means deleted upstream.
+      const found = { name: skill.cliName, source: cliSourceName(skill) }
       if (err instanceof HttpError && err.message === "not_upstream")
-        svc.updates.noteUpstream(skill.scope, {
-          deleted: [{ name: skill.cliName, source: cliSourceName(skill) }],
-        })
+        await svc.updates.noteUpstream(skill.scope, { deleted: [found] })
+      if (err instanceof HttpError && err.message === "ambiguous_upstream")
+        await svc.updates.noteUpstream(skill.scope, { ambiguous: [found] })
       throw err
     }
   })
@@ -92,7 +95,11 @@ export function skillRoutes(svc: Services): Hono {
 
   app.delete("/skills/:id", async (c) => {
     const skill = await lookup(c.req.param("id"))
-    const job = svc.actions.remove(skill)
+    const plan =
+      skill.origin === "npx"
+        ? (await svc.removals.plans(skill.scope, [skill.cliName]))[0]
+        : undefined
+    const job = svc.actions.remove(skill, plan)
     const body: JobRef = { jobId: job.id }
     return c.json(body, 202)
   })

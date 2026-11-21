@@ -250,6 +250,30 @@ export interface UpdateStatus {
    * a skill source (owner/repo, URL) or a skill name.
    */
   failed?: { scope: ScopeKey; name: string; reason: string }[]
+  /**
+   * GET /api/updates and POST /api/updates/check only: one entry per deletedUpstream skill,
+   * computed from the disk and the lock file at request time. It says exactly what
+   * `skills remove` would delete for that name. A dialog shows `willDelete` and `kept`, and
+   * offers a name only when `blocked` is missing. Absent: no plan yet, do not offer the name.
+   */
+  removalPlans?: RemovalPlan[]
+}
+
+/** What removing one deleted-upstream skill would do on disk. */
+export interface RemovalPlan {
+  scope: ScopeKey
+  /** the CLI name (lock key), as in deletedUpstream */
+  name: string
+  /**
+   * Absolute paths that `skills remove` deletes: the canonical folder (.agents/skills/<name>)
+   * and agent placements that are links to it. Empty when `blocked` is set, or when only the
+   * lock entry is left to remove.
+   */
+  willDelete: string[]
+  /** Same-named placements that stay, and why (e.g. "independent copy"). */
+  kept: { path: string; reason: string }[]
+  /** Set when the name cannot be removed here: the reason. The UI must not offer the name. */
+  blocked?: string
 }
 
 // GET  /api/updates            -> UpdateStatus  (cached; the server starts a check on boot)
@@ -262,16 +286,37 @@ export interface UpdateStatus {
 //   at once (names omitted: every name in the scope), so the skill list stops flagging them.
 //   Whatever the outcome, it then re-runs the check in the background.
 //   remove: deleted-upstream skills to remove after the update, in the same job: a second step
-//   `skills remove -s <remove...> -y` (+ -g for user, cwd = project). 400 unless every name is in
-//   UpdateStatus.deletedUpstream for that scope. The step is skipped when the update step fails.
-//   On success the names leave deletedUpstream at once. With remove set and names omitted or
-//   empty, the job only removes (no update step). Overlap (409) counts names and remove together.
+//   `skills remove -s <names> -a <agents> -y` (+ -g for user, cwd = project), one call per set of
+//   agents. `-a` lists only the agents whose placement is the canonical folder or a link to it,
+//   so independent same-named copies stay (RemovalPlan.kept).
+//   Names and update names: an exact lock key of the scope, or a plain name (letters, digits,
+//   _ . : + @ -); never a leading "-" or a control character (400).
+//   400 unless every remove name is in UpdateStatus.deletedUpstream for that scope, its lock
+//   entry is still the one it was found deleted for, and removePlans lists it.
+//   409 "removal_conflict" when a name collides with another lock key under the CLI's
+//   sanitizeName, or would resolve to another lock key; 409 "removal_blocked" when its plan is
+//   blocked; 409 "removal_plan_changed" when the server would delete a path that the
+//   removePlans entry does not list (reopen the dialog).
+//   Right before step 2, inside the job, each name is checked again: the lock entry must be
+//   unchanged, a fresh upstream fetch (no cache) must still find it deleted, and the plan must
+//   still be within removePlans. A name that fails a check is skipped and the job log says why.
+//   Step 2 is skipped when step 1 printed a failure, whatever its exit code. After step 2 the
+//   job checks the disk: every willDelete path gone, the lock entry gone, every kept path still
+//   there. Otherwise the job fails and the name stays in deletedUpstream.
+//   Names that left the disk leave deletedUpstream at once. With remove set and names omitted
+//   or empty, the job only removes (no update step). Overlap (409) counts names and remove
+//   together.
 
 export interface UpdateRunRequest {
   scope: ScopeKey
   names?: string[] // omitted = all in that scope (unless remove is set: then none)
   /** CLI names from UpdateStatus.deletedUpstream (this scope) to remove after the update */
   remove?: string[]
+  /**
+   * Required with `remove`: for each name, the RemovalPlan.willDelete list that the dialog
+   * showed. The server never deletes a path that is not listed here.
+   */
+  removePlans?: { name: string; willDelete: string[] }[]
 }
 
 // GET /api/skills/:id/update-preview -> UpdatePreview

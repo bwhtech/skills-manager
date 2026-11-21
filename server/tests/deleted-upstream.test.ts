@@ -1,40 +1,16 @@
 import { describe, expect, test } from "bun:test"
-import { Hono } from "hono"
+import { lstat } from "node:fs/promises"
+import { join } from "node:path"
 import type { UpdateStatus } from "../../shared/api.ts"
 import { SkillActions, removeSucceeded, updateSucceeded } from "../actions.ts"
 import type { IndexedSkill } from "../discovery/skill-index.ts"
 import type { SkillsCli } from "../cli/skills-cli.ts"
 import type { ProjectService } from "../discovery/projects.ts"
-import { handleError, HttpError } from "../lib/errors.ts"
+import { HttpError } from "../lib/errors.ts"
 import { JobManager } from "../jobs.ts"
 import { toSummary } from "../routes/skills.ts"
-import { updateRoutes } from "../routes/updates.ts"
-import type { Services } from "../services.ts"
 import { UpdateChecker } from "../updates.ts"
-
-type Reply = { exitCode: number; lines: string[] }
-
-/**
- * A CLI stand-in. `replies` maps a subcommand ("update", "remove", "check") to what it
- * prints and its exit code. Every call is recorded.
- */
-function scriptedCli(replies: Record<string, Reply>) {
-  const calls: string[][] = []
-  const cli = {
-    display: (args: string[]) => ["skills", ...args].join(" "),
-    stream: async (args: string[], _cwd: string, onLine: (line: string) => void) => {
-      calls.push(args)
-      const reply = replies[args[0]] ?? { exitCode: 0, lines: [] }
-      for (const line of reply.lines) onLine(line)
-      return { exitCode: reply.exitCode, timedOut: false }
-    },
-    capture: async (args: string[]) => {
-      const reply = replies[args[0]] ?? { exitCode: 0, lines: [] }
-      return { exitCode: reply.exitCode, timedOut: false, output: reply.lines.join("\n") }
-    },
-  } as unknown as SkillsCli
-  return { cli, calls }
-}
+import { makeFixture, settle, shownPlans, wire, type Reply } from "./removal-harness.ts"
 
 const DELETED_CHECK: Reply = {
   exitCode: 1,
@@ -64,48 +40,20 @@ const UPDATE_OK: Reply = {
   ],
 }
 
-const REMOVE_OK: Reply = {
-  exitCode: 0,
-  lines: ["◇  Removal process complete", "◆  Successfully removed 2 skill(s)", "└  Done!"],
-}
-
-async function settle(jobs: JobManager) {
-  while (jobs.unfinished().length) await Bun.sleep(1)
-  await Bun.sleep(1)
-}
-
-/** Checker, actions and the /updates routes wired like services.ts does. */
+/**
+ * A fixture HOME whose lock has fresh, gone-one, gone-two and twin, with canonical folders
+ * for the gone ones; the check reports them as in DELETED_CHECK. `skills remove` is the real
+ * CLI; update and check print the replies.
+ */
 async function setup(replies: Record<string, Reply>) {
-  const { cli, calls } = scriptedCli({ check: DELETED_CHECK, ...replies })
-  const projects = { paths: () => [], has: () => false } as unknown as ProjectService
-  const updates = new UpdateChecker(cli, projects)
-  const jobs = new JobManager(() => updates.start())
-  const hooks: string[] = []
-  const actions = new SkillActions(cli, jobs, {
-    afterUpdate: (scope, names, succeeded, output) => {
-      hooks.push(`update ${succeeded}`)
-      updates.noteJobOutput(scope, output)
-      if (succeeded) updates.markUpdated(scope, names)
-    },
-    afterRemove: (scope, names, succeeded) => {
-      hooks.push(`remove ${names.join(",")} ${succeeded}`)
-      if (succeeded) updates.markRemoved(scope, names)
-      hooks.push(`left ${(updates.get().deletedUpstream ?? []).map((d) => d.name).join(",")}`)
-    },
-  })
-  updates.start()
-  while (updates.get().checking) await Bun.sleep(1)
-  const app = new Hono()
-  app.onError(handleError)
-  app.route("/", updateRoutes({ updates, projects, actions } as unknown as Services))
-  const run = (body: unknown) =>
-    app.request("/updates/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    })
-  return { updates, jobs, actions, calls, hooks, run }
+  const fx = await makeFixture()
+  await fx.writeLock({ fresh: {}, "gone-one": {}, "gone-two": {}, twin: {} })
+  for (const name of ["fresh", "gone-one", "gone-two", "twin"]) await fx.skill(".agents/skills", name)
+  const w = await wire(fx, { check: DELETED_CHECK, ...replies })
+  return { ...w, fx, plans: (names: string[]) => shownPlans(w, names) }
 }
+
+const nonCheck = (calls: string[][]) => calls.filter((c) => c[0] !== "check")
 
 describe("UpdateStatus.deletedUpstream", () => {
   test("a check lists deleted and ambiguous skills apart from available", async () => {
@@ -122,11 +70,15 @@ describe("UpdateStatus.deletedUpstream", () => {
     expect(updates.isDeleted("/p", "gone-one")).toBe(false)
   })
 
-  test("an update job's output adds the deleted skills it found", async () => {
+  test("an update job's output adds the deleted skills it found, bound to their lock entries", async () => {
     const { updates } = await setup({ check: { exitCode: 0, lines: [] } })
     expect(updates.get().deletedUpstream).toEqual([])
-    updates.noteJobOutput("user", UPDATE_OK.lines.join("\n"))
+    await updates.noteJobOutput("user", UPDATE_OK.lines.join("\n"))
     expect(updates.get().deletedUpstream?.map((d) => d.name)).toEqual(["gone-one", "gone-two"])
+    expect(updates.record("user", "gone-one")?.fingerprint).toContain("gone-one")
+    // A name the lock does not have is not recorded: there is nothing to bind it to.
+    await updates.noteUpstream("user", { deleted: [{ name: "ghost", source: "owner/repo" }] })
+    expect(updates.isDeleted("user", "ghost")).toBe(false)
   })
 
   test("a scope whose check failed is listed in scopeErrors", async () => {
@@ -141,25 +93,29 @@ describe("UpdateStatus.deletedUpstream", () => {
 
 describe("POST /updates/run with remove", () => {
   test("update first, then remove, in one job; both steps in the log; pruned at once", async () => {
-    const { run, jobs, calls, hooks } = await setup({ update: UPDATE_OK, remove: REMOVE_OK })
-    const res = await run({ scope: "user", names: ["fresh"], remove: ["gone-one", "gone-two"] })
+    const { run, jobs, calls, updates, fx, plans } = await setup({ update: UPDATE_OK })
+    const res = await run({ scope: "user", names: ["fresh"], remove: ["gone-one", "gone-two"], removePlans: await plans(["gone-one", "gone-two"]) })
     expect(res.status).toBe(202)
     const { jobId } = (await res.json()) as { jobId: string }
     const job = jobs.get(jobId)!
     expect(job.kind).toBe("update")
     expect(job.update).toEqual({ scope: "user", names: ["fresh", "gone-one", "gone-two"] })
     expect(job.remove).toEqual(["gone-one", "gone-two"])
-    expect(job.command).toBe("skills update fresh -g -y && skills remove -s gone-one gone-two -y -g")
+    expect(job.command).toBe("skills update fresh -g -y && skills remove -s gone-one gone-two -a codex -y -g")
     await settle(jobs)
-    expect(calls.filter((c) => c[0] !== "check")).toEqual([
+    expect(nonCheck(calls)).toEqual([
       ["update", "fresh", "-g", "-y"],
-      ["remove", "-s", "gone-one", "gone-two", "-y", "-g"],
+      ["remove", "-s", "gone-one", "gone-two", "-a", "codex", "-y", "-g"],
     ])
     expect(job.status).toBe("success")
     expect(job.log).toContain("Step 1 of 2: skills update fresh -g -y")
-    expect(job.log).toContain("Step 2 of 2: skills remove -s gone-one gone-two -y -g")
-    // Pruned in the hook, before the re-check (which the stub answers with the old output).
-    expect(hooks).toEqual(["update true", "remove gone-one,gone-two true", "left "])
+    expect(job.log).toContain("Step 2 of 2: remove the deleted-upstream skills")
+    expect(job.log).toContain("$ skills remove -s gone-one gone-two -a codex -y -g")
+    expect(job.log).toContain("Removed and verified: gone-one, gone-two")
+    expect(updates.get().deletedUpstream).toEqual([])
+    expect(updates.get().available).toEqual([])
+    for (const name of ["gone-one", "gone-two"])
+      expect(await lstat(join(fx.home, ".agents/skills", name)).catch(() => null)).toBeNull()
   })
 
   test("the pruned skills stay out of a check that started before the remove", async () => {
@@ -176,44 +132,46 @@ describe("POST /updates/run with remove", () => {
     expect(updates.get().deletedUpstream).toHaveLength(2)
     updates.markRemoved("user", ["gone-one"])
     expect(updates.get().deletedUpstream?.map((d) => d.name)).toEqual(["gone-two"])
+    expect(updates.record("user", "gone-one")).toBeNull()
   })
 
   test("a failed update skips the remove step", async () => {
-    const { run, jobs, calls, hooks } = await setup({
+    const { run, jobs, calls, updates, plans } = await setup({
       update: { exitCode: 1, lines: ["✗ Failed to update fresh", "Failed to update 1 skill(s)"] },
-      remove: REMOVE_OK,
     })
-    const { jobId } = (await (await run({ scope: "user", names: ["fresh"], remove: ["gone-one"] })).json()) as {
-      jobId: string
-    }
+    const { jobId } = (await (
+      await run({ scope: "user", names: ["fresh"], remove: ["gone-one"], removePlans: await plans(["gone-one"]) })
+    ).json()) as { jobId: string }
     await settle(jobs)
     const job = jobs.get(jobId)!
     expect(job.status).toBe("error")
     expect(calls.some((c) => c[0] === "remove")).toBe(false)
-    expect(job.log).toContain("Step 2 of 2 skipped: the update failed, so nothing was removed.")
-    expect(hooks).toEqual(["update false", "remove gone-one false", "left gone-one,gone-two"])
+    expect(job.log).toContain("Step 2 of 2 skipped: the update could not check fresh, so nothing was removed.")
+    expect(updates.get().deletedUpstream?.map((d) => d.name)).toEqual(["gone-one", "gone-two"])
+    expect(updates.get().available.map((a) => a.name)).toEqual(["fresh"])
   })
 
   test("remove only: names empty runs no update step", async () => {
-    const { run, jobs, calls } = await setup({ remove: REMOVE_OK })
-    const { jobId } = (await (await run({ scope: "user", names: [], remove: ["gone-two"] })).json()) as {
-      jobId: string
-    }
+    const { run, jobs, calls, plans } = await setup({})
+    const { jobId } = (await (
+      await run({ scope: "user", names: [], remove: ["gone-two"], removePlans: await plans(["gone-two"]) })
+    ).json()) as { jobId: string }
     await settle(jobs)
     const job = jobs.get(jobId)!
     expect(job.kind).toBe("remove")
     expect(job.update).toEqual({ scope: "user", names: ["gone-two"] })
-    expect(calls.filter((c) => c[0] !== "check")).toEqual([["remove", "-s", "gone-two", "-y", "-g"]])
+    expect(nonCheck(calls)).toEqual([["remove", "-s", "gone-two", "-a", "codex", "-y", "-g"]])
     expect(job.status).toBe("success")
   })
 
   test("names that are not deleted upstream in that scope are refused", async () => {
-    const { run, calls } = await setup({})
+    const { run, calls, plans } = await setup({})
+    const removePlans = await plans(["gone-one"])
     for (const body of [
-      { scope: "user", names: ["fresh"], remove: ["fresh"] },
-      { scope: "user", remove: ["twin"] }, // ambiguous: never removed here
-      { scope: "user", remove: ["-g"] },
-      { scope: "user", remove: "gone-one" },
+      { scope: "user", names: ["fresh"], remove: ["fresh"], removePlans },
+      { scope: "user", remove: ["twin"], removePlans }, // ambiguous: never removed here
+      { scope: "user", remove: ["-g"], removePlans },
+      { scope: "user", remove: "gone-one", removePlans },
     ]) {
       const res = await run(body)
       expect(res.status).toBe(400)
@@ -228,11 +186,12 @@ describe("POST /updates/run with remove", () => {
       stream: () => new Promise((resolve) => pending.push(() => resolve({ exitCode: 0, timedOut: false }))),
     } as unknown as SkillsCli
     const jobs = new JobManager()
-    const blocking = new SkillActions(slow, jobs)
+    const blocking = new SkillActions(slow, jobs, {}, {} as never, async () => ({ skills: new Map(), lastSelectedAgents: [] }))
     blocking.update({ scope: "user", names: ["gone-one"] })
     let err: HttpError | null = null
     try {
-      blocking.update({ scope: "user", names: [], remove: ["gone-one"] })
+      const plan = { scope: "user", name: "gone-one", willDelete: [], kept: [], agents: ["codex"] }
+      blocking.update({ scope: "user", names: [], remove: { plans: [plan], shown: new Map() } })
     } catch (e) {
       err = e as HttpError
     }
@@ -245,10 +204,11 @@ describe("POST /updates/run with remove", () => {
 
 describe("step outcomes", () => {
   test("skills remove exits 0 even when nothing was removed", () => {
-    expect(removeSucceeded({ code: 0, output: REMOVE_OK.lines.join("\n") })).toBe(true)
+    expect(removeSucceeded({ code: 0, output: "◆  Successfully removed 2 skill(s)\n└  Done!" })).toBe(true)
     expect(removeSucceeded({ code: 0, output: "■  No matching skills found for: x" })).toBe(false)
     expect(removeSucceeded({ code: 0, output: "Failed to remove 1 skill(s)\n  ✗ x: EACCES" })).toBe(false)
     expect(removeSucceeded({ code: 1, output: "" })).toBe(false)
+    expect(removeSucceeded({ code: 0, output: "▲  Could not remove skill from Augment: EACCES" })).toBe(false)
   })
 
   test("an update whose only failures are skills gone from their download succeeded", () => {
@@ -257,6 +217,8 @@ describe("step outcomes", () => {
     expect(updateSucceeded({ code: 1, output: `${gone}\n✗ Failed to update x` })).toBe(false)
     expect(updateSucceeded({ code: 1, output: "TypeError: boom" })).toBe(false)
     expect(updateSucceeded({ code: 0, output: "" })).toBe(true)
+    // skills update prints this and still exits 0 when a source cannot be fetched.
+    expect(updateSucceeded({ code: 0, output: "  ✗ Failed to check skills from owner/repo" })).toBe(false)
   })
 })
 
@@ -279,7 +241,9 @@ describe("SkillSummary.cliName", () => {
   } as IndexedSkill
 
   test("the summary carries the CLI name, and flags match on it", async () => {
-    const { updates } = await setup({
+    const fx = await makeFixture()
+    await fx.writeLock({ "foo-bar": { source: "a/b" } })
+    const { updates } = await wire(fx, {
       check: {
         exitCode: 0,
         lines: ["Warning: The following skills from a/b appear to have been deleted upstream:", "  • foo-bar"],

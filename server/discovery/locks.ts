@@ -17,11 +17,46 @@ export interface LockEntry {
   /** global lock, well-known sources */
   sourceBaseUrl?: string
   wellKnownDigest?: string
+  /** project lock: hash of the installed folder */
+  computedHash?: string
+  /** commit the skill was installed from, when known */
+  commit?: string
+  installedAt?: string
+  updatedAt?: string
 }
 
 export interface SkillLock {
   skills: Map<string, LockEntry>
   lastSelectedAgents: string[]
+}
+
+/** The lock of a scope: the global lock for "user", else the project's skills-lock.json. */
+export type LockReader = (scope: string) => Promise<SkillLock>
+
+export const readScopeLock: LockReader = (scope) =>
+  scope === "user" ? readGlobalLock() : readProjectLock(scope)
+
+/**
+ * Identity of a lock entry: the key and every field that a reinstall or an update rewrites.
+ * Two equal fingerprints mean the entry was not touched in between.
+ */
+export function lockFingerprint(key: string, entry: LockEntry): string {
+  return JSON.stringify([
+    key,
+    entry.source,
+    entry.sourceUrl ?? null,
+    entry.sourceType ?? null,
+    entry.skillPath ?? null,
+    entry.ref ?? null,
+    entry.skillName ?? null,
+    entry.skillFolderHash ?? null,
+    entry.computedHash ?? null,
+    entry.commit ?? null,
+    entry.sourceBaseUrl ?? null,
+    entry.wellKnownDigest ?? null,
+    entry.installedAt ?? null,
+    entry.updatedAt ?? null,
+  ])
 }
 
 /** ~/.agents/.skill-lock.json */
@@ -42,7 +77,7 @@ export function toSkillSource(entry: LockEntry): SkillSource {
   return out
 }
 
-async function readLock(path: string): Promise<SkillLock> {
+export async function readLock(path: string): Promise<SkillLock> {
   const lock: SkillLock = { skills: new Map(), lastSelectedAgents: [] }
   let raw: {
     skills?: Record<string, Partial<LockEntry>>
@@ -65,6 +100,10 @@ async function readLock(path: string): Promise<SkillLock> {
       skillFolderHash: str(entry.skillFolderHash),
       sourceBaseUrl: str(entry.sourceBaseUrl),
       wellKnownDigest: str(entry.wellKnownDigest),
+      computedHash: str(entry.computedHash),
+      commit: str(entry.commit),
+      installedAt: str(entry.installedAt),
+      updatedAt: str(entry.updatedAt),
     })
   }
   if (Array.isArray(raw.lastSelectedAgents)) {
