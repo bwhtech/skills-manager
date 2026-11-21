@@ -15,6 +15,7 @@ import {
   readFile,
   readlink,
   rename,
+  rmdir,
   stat,
   symlink,
   unlink,
@@ -175,6 +176,36 @@ async function linkText(
   return targetReal
 }
 
+/**
+ * Puts the file at `from` back at `path` without ever replacing what is there, and never
+ * throws. A regular file goes back through link(2) (EEXIST if a file appeared); anything
+ * else through mkdir + rename onto our own empty dir. When it cannot, `from` is kept.
+ */
+export async function putBack(
+  from: string,
+  path: string
+): Promise<{ restored: true } | { restored: false; keptAt: string; why: string }> {
+  try {
+    const st = await lstat(from)
+    if (st.isDirectory()) {
+      await mkdir(path)
+      try {
+        await rename(from, path)
+      } catch (err) {
+        await rmdir(path).catch(() => {})
+        throw err
+      }
+      return { restored: true }
+    }
+    await link(from, path)
+    await unlink(from).catch(() => {})
+    return { restored: true }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    return { restored: false, keptAt: from, why: code === "EEXIST" ? "a new file appeared there" : (err as Error).message }
+  }
+}
+
 /** Puts the file at `backup` back at `path`, never over a file that appeared there. */
 async function restoreBackup(backup: string, path: string): Promise<boolean> {
   try {
@@ -233,39 +264,54 @@ export async function linkFile(
 
     // 1. Move the live file out of the way: rename is atomic and keeps the
     //    bytes that are there at this moment, whatever was read before.
+    //    From here on the user's file lives under a temporary name, so every
+    //    failure path either puts it back without replacing anything, or says
+    //    exactly where it is. Nothing deletes the only remaining name.
     const moving = scratchName(sourcePath, "moving")
     await rename(sourcePath, moving)
-    const moved = await lstat(moving)
-    if (!moved.isFile()) {
-      // Replaced from outside since the probe: put it back if the name is free.
-      if (!(await lstat(sourcePath).catch(() => null)))
-        await rename(moving, sourcePath)
-      throw new HttpError(409, "source_not_file", `${sourcePath} changed on disk. Nothing was changed.`)
+    let backupPath: string | null = null
+    /** The name that surely holds the user's file right now. */
+    const held = () => backupPath ?? moving
+
+    const giveBack = async (reason: string, code: string, status: 409 | 500, extra: Record<string, unknown> = {}) => {
+      const back = await putBack(held(), sourcePath)
+      if (back.restored && backupPath) await unlink(moving).catch(() => {})
+      throw new HttpError(
+        status,
+        code,
+        back.restored
+          ? reason
+          : `${reason} Your file could not be put back at ${sourcePath} (${back.why}); it is kept at ${back.keptAt}.`,
+        { ...extra, ...(back.restored ? {} : { keptAt: back.keptAt }) }
+      )
     }
+
+    const moved = await lstat(moving).catch(() => null)
+    if (!moved?.isFile())
+      return giveBack(`${sourcePath} changed on disk. Nothing was changed.`, "source_not_file", 409)
+
     // 2. Give it a backup name without replacing an existing backup.
-    let backupPath: string
     try {
       backupPath = await linkAsBackup(moving, sourcePath)
     } catch (err) {
-      await rename(moving, sourcePath).catch(() => {})
-      throw err
+      return giveBack(`Could not make a backup of ${sourcePath} (${(err as Error).message}). Nothing was changed.`, "backup_failed", 500)
     }
-    await unlink(moving)
+    // Both names are the same file now; the scratch one is only a leftover.
+    const leftover = await unlink(moving).then(
+      () => null,
+      () => moving
+    )
 
     // 3. The backup is what the user would lose: it must be what they saw.
-    const bytes = await readFile(backupPath)
-    const currentHash = contentHash(bytes)
-    if (currentHash !== options.baseHash) {
-      const restored = await restoreBackup(backupPath, sourcePath)
-      throw new HttpError(
-        409,
-        "conflict",
-        restored
-          ? "The file changed on disk"
-          : `The file changed on disk, and a new file appeared at ${sourcePath}. Your file is kept at ${backupPath}.`,
-        { currentHash, currentMtimeMs: moved.mtimeMs, ...(restored ? {} : { backupPath }) }
-      )
+    let bytes: Buffer
+    try {
+      bytes = await readFile(backupPath)
+    } catch (err) {
+      return giveBack(`Could not read ${sourcePath} to check it (${(err as Error).message}). Nothing was changed.`, "unreadable", 500)
     }
+    const currentHash = contentHash(bytes)
+    if (currentHash !== options.baseHash)
+      return giveBack("The file changed on disk.", "conflict", 409, { currentHash, currentMtimeMs: moved.mtimeMs })
 
     // 4. The link goes to the now free name; symlink(2) never replaces.
     try {
@@ -278,9 +324,9 @@ export async function linkFile(
           `A new file appeared at ${sourcePath} during the sync. It was kept, and your file is at ${backupPath}.`,
           { backupPath }
         )
-      await restoreBackup(backupPath, sourcePath).catch(() => false)
-      throw err
+      return giveBack(`Could not create the link (${(err as Error).message}). Nothing was changed.`, "link_failed", 500)
     }
+    if (leftover) console.warn(`instruction sync: could not remove the scratch name ${leftover} (same file as ${backupPath})`)
     await verifyLink(sourcePath, text, targetPath, targetReal, backupPath)
     return { backupPath }
   })
@@ -357,8 +403,15 @@ export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<
       await rename(path, moving)
       const moved = await lstat(moving)
       if (!moved.isSymbolicLink()) {
-        await restoreBackup(moving, path).catch(() => false)
-        throw new HttpError(409, "conflict", `${path} changed on disk. Nothing was changed.`)
+        const back = await putBack(moving, path)
+        throw new HttpError(
+          409,
+          "conflict",
+          back.restored
+            ? `${path} changed on disk. Nothing was changed.`
+            : `${path} changed on disk, and it could not be put back (${back.why}); it is kept at ${back.keptAt}.`,
+          back.restored ? undefined : { keptAt: back.keptAt }
+        )
       }
       try {
         await link(temp, path)
@@ -368,8 +421,16 @@ export async function unlinkFile(path: string, mode: "copy" | "empty"): Promise<
           await unlink(moving).catch(() => {})
           throw new HttpError(409, "exists", `A new file appeared at ${path}. It was kept.`)
         }
-        await rename(moving, path).catch(() => {})
-        throw err
+        // Put the old link back without replacing anything; it is only a pointer either way.
+        const back = await putBack(moving, path)
+        throw new HttpError(
+          500,
+          "unlink_failed",
+          back.restored
+            ? `Could not create the file (${(err as Error).message}). Nothing was changed.`
+            : `Could not create the file (${(err as Error).message}), and the old link could not be put back (${back.why}); it is at ${back.keptAt}.`,
+          back.restored ? undefined : { keptAt: back.keptAt }
+        )
       }
       await unlink(moving)
     } finally {

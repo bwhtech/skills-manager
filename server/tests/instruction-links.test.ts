@@ -495,3 +495,60 @@ describe("file types", () => {
     expect((await lstat(join(home, "somedir"))).isDirectory()).toBe(true)
   })
 })
+
+describe("link failures after the file is moved (review: recovery)", () => {
+  test("an unreadable source is put back under its name, with no backup or scratch left", async () => {
+    await writeFile(claude(), "# shared\n")
+    await writeFile(codex(), "# codex\n")
+    const before = await lstat(codex())
+    const { chmod } = await import("node:fs/promises")
+    await chmod(codex(), 0o000)
+    try {
+      const res = await link(codex(), claude(), contentHash("# codex\n"))
+      expect(res.status).toBe(500)
+      expect(res.body.error).toBe("unreadable")
+      const after = await lstat(codex())
+      expect(after.isFile()).toBe(true)
+      expect(after.ino).toBe(before.ino)
+      expect((await readdir(join(home, ".codex"))).sort()).toEqual(["AGENTS.md"])
+    } finally {
+      await chmod(codex(), 0o644).catch(() => {})
+    }
+    expect(await readFile(codex(), "utf8")).toBe("# codex\n")
+  })
+
+  test("putBack never replaces a file that appeared, and reports where the original is", async () => {
+    const { putBack } = await import("../discovery/instruction-links.ts")
+    const from = join(home, ".codex/.AGENTS.md.x.moving")
+    await writeFile(from, "mine\n")
+    await writeFile(codex(), "appeared\n")
+    const res = await putBack(from, codex())
+    expect(res.restored).toBe(false)
+    if (!res.restored) expect(res.keptAt).toBe(from)
+    expect(await readFile(codex(), "utf8")).toBe("appeared\n")
+    expect(await readFile(from, "utf8")).toBe("mine\n")
+  })
+
+  test("putBack restores a file and a directory when the name is free", async () => {
+    const { putBack } = await import("../discovery/instruction-links.ts")
+    const file = join(home, ".codex/.f.moving")
+    await writeFile(file, "f\n")
+    expect((await putBack(file, codex())).restored).toBe(true)
+    expect(await readFile(codex(), "utf8")).toBe("f\n")
+    expect(await lstat(file).catch(() => null)).toBeNull()
+
+    const dir = join(home, ".codex/.d.moving")
+    await mkdir(dir)
+    await writeFile(join(dir, "x"), "x")
+    const dest = join(home, ".codex/restored-dir")
+    expect((await putBack(dir, dest)).restored).toBe(true)
+    expect(await readFile(join(dest, "x"), "utf8")).toBe("x")
+
+    // A directory that appeared at the destination is never replaced.
+    const dir2 = join(home, ".codex/.d2.moving")
+    await mkdir(dir2)
+    const res = await putBack(dir2, dest)
+    expect(res.restored).toBe(false)
+    expect(await readFile(join(dest, "x"), "utf8")).toBe("x")
+  })
+})
