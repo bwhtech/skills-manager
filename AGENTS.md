@@ -15,7 +15,7 @@ to install, update and remove skills.
   tailnet through Tailscale Serve); there is no login.
 - Service: systemd user unit `SKILLS_MANAGER_UNIT` (default `skills-manager`).
   Status: `systemctl --user status skills-manager`. Logs: `journalctl --user -u skills-manager -f`.
-- Repo: `bwhtech/skills-manager` (private).
+- Repo: `bwhtech/skills-manager` (public, MIT). Never commit server data or secrets.
 - Production runs from a separate worktree, `SKILLS_MANAGER_LIVE_DIR` (default `<repo>-live`).
   To ship, commit, then run `scripts/deploy.sh` (see Production).
 - Dev: `bun run dev` serves the UI on `SKILLS_MANAGER_DEV_PORT` (default 5530). It sends `/api`

@@ -80,3 +80,7 @@ all settings.
 
 Bun and Hono on the server, React 19, Vite and shadcn/ui in the browser, CodeMirror 6 for the
 editor. [AGENTS.md](AGENTS.md) has the details for contributors and coding agents.
+
+## License
+
+[MIT](LICENSE)
