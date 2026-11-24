@@ -14,7 +14,7 @@ type SkillRef = Pick<IndexedSkill, "id" | "realPath" | "scope" | "scopes">
 
 export interface OpenDeps {
   home: string
-  /** folders whose files may be shown (HOME and /mnt/data) */
+  /** folders whose files may be shown (HOME and SKILLS_MANAGER_FILE_ROOTS) */
   roots: string[]
   skills: () => Promise<SkillRef[]>
   instructions: Pick<InstructionService, "find" | "findByRealPath">
@@ -27,7 +27,6 @@ const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i
 const MARKDOWN = /\.md$/i
 
 export const READ_ONLY_REFUSAL = "Only Markdown files can be edited here"
-const OUTSIDE = "Only files under HOME and /mnt/data can be opened"
 
 /** Strips a Markdown anchor (#section) and a trailing :line or :line:col. */
 export function parseRawPath(raw: string): { path: string; line?: number } {
@@ -68,7 +67,7 @@ export class PathOpener {
     }
     const doc = await this.deps.instructions.findByRealPath(real)
     if (doc) return { kind: "instruction", id: doc.id, scope: doc.scope, ...at }
-    // The path as written reads better than the real one (/mnt/data is a link to a volume).
+    // The path as written reads better than the real one (a root can be a link to a volume).
     return { kind: "file", path: absolute, ...at }
   }
 
@@ -86,7 +85,7 @@ export class PathOpener {
    */
   async save(rawPath: unknown, req: SaveRequest): Promise<SaveResponse> {
     const path = requireAbsolute(rawPath)
-    const real = await this.checkedFile(path, { outside: () => forbidden("Only files under HOME and /mnt/data can be edited") })
+    const real = await this.checkedFile(path, { outside: () => forbidden(this.outsideMessage("edited")) })
     if (!MARKDOWN.test(path) || !MARKDOWN.test(real)) throw new HttpError(403, "read_only", READ_ONLY_REFUSAL)
     // Under the lock: the asked path still leads to `real`, and `real` itself still passes the
     // root, secret and file checks (it is the exact path the save writes, with no second realpath).
@@ -98,6 +97,12 @@ export class PathOpener {
         throw new HttpError(409, "moved", "The file was moved or replaced; reload it")
     }
     return saveTextFile(real, req, { resolved: true, guard })
+  }
+
+  /** "Only files under HOME and /srv/x can be opened": the roots as configured, HOME by name. */
+  private outsideMessage(verb: "opened" | "edited"): string {
+    const others = this.deps.roots.filter((root) => root !== this.deps.home)
+    return `Only files under ${["HOME", ...others].join(" and ")} can be ${verb}`
   }
 
   private async absolute(path: string, from: unknown): Promise<string> {
@@ -131,7 +136,7 @@ export class PathOpener {
     const real = await realpathOrNull(path)
     if (!real) throw notFound(`No such file: ${path}`)
     if (SYSTEM_DIRS.some((dir) => isInside(dir, real)) || !roots.some((root) => isInside(root, real)))
-      throw options.outside?.() ?? notFound(OUTSIDE)
+      throw options.outside?.() ?? notFound(this.outsideMessage("opened"))
     if (secret(real)) throw forbidden(SECRET_REFUSAL)
     const info = await stat(real)
     if (!info.isFile()) throw notFound(`Not a file: ${path}`)

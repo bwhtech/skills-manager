@@ -91,8 +91,13 @@ function quoteForDisplay(arg: string): string {
   return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, "'\\''")}'`
 }
 
-/** `gh auth token`, read once. Returns null when gh is missing or logged out. */
+/**
+ * Env GITHUB_TOKEN when set, else `gh auth token`, read once.
+ * Returns null when neither gives a token (gh missing or logged out).
+ */
 export function readGithubToken(): string | null {
+  const fromEnv = process.env.GITHUB_TOKEN?.trim()
+  if (fromEnv) return fromEnv
   try {
     const out = Bun.spawnSync(["gh", "auth", "token"], {
       stdin: "ignore",

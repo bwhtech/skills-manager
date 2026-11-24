@@ -46,9 +46,14 @@ export const config = {
   host: process.env.HOST ?? "127.0.0.1",
   /**
    * Host names the API answers to, besides localhost, 127.0.0.1 and [::1] (any port).
-   * Env SKILLS_MANAGER_ALLOWED_HOSTS (comma-separated) replaces the default tailnet name.
+   * Env SKILLS_MANAGER_ALLOWED_HOSTS (comma-separated host names, no ports). Default: none.
    */
-  allowedHosts: parseList(process.env.SKILLS_MANAGER_ALLOWED_HOSTS) ?? ["hussain-coding.tail5c9b7d.ts.net"],
+  allowedHosts: parseList(process.env.SKILLS_MANAGER_ALLOWED_HOSTS) ?? [],
+  /**
+   * Folders besides HOME whose files /api/open and /api/file may show (and whose Markdown files
+   * they may save). Env SKILLS_MANAGER_FILE_ROOTS (comma-separated absolute paths). Default: none.
+   */
+  extraFileRoots: parsePaths(process.env.SKILLS_MANAGER_FILE_ROOTS),
   home,
   root,
   skillsBin: process.env.SKILLS_BIN ?? join(root, "node_modules/.bin/skills"),
@@ -63,8 +68,8 @@ export const config = {
   claudeHome: process.env.CLAUDE_CONFIG_DIR?.trim() || join(home, ".claude"),
   codexHome: process.env.CODEX_HOME?.trim() || join(home, ".codex"),
   scanDepth: 4,
-  /** Directories the project scan never enters. */
-  scanSkipPaths: [join(home, "pilot"), "/mnt/data/cache"],
+  /** Directories the project scan never enters. Env SKILLS_MANAGER_SCAN_SKIP (comma-separated). */
+  scanSkipPaths: parsePaths(process.env.SKILLS_MANAGER_SCAN_SKIP),
   skillCacheTtlMs: 10_000,
   cliTimeoutMs: 120_000,
   /** Upstream checkouts for update previews. Wiped at startup. */
@@ -80,6 +85,14 @@ export const config = {
 function parseList(value: string | undefined): string[] | undefined {
   const items = value?.split(",").map((s) => s.trim()).filter(Boolean)
   return items?.length ? items : undefined
+}
+
+/** A comma-separated list of paths; `~` and `~/…` expand to HOME, relative paths are dropped. */
+function parsePaths(value: string | undefined): string[] {
+  return (parseList(value) ?? [])
+    .map((p) => (p === "~" || p.startsWith("~/") ? join(home, p.slice(1)) : p))
+    .filter((p) => p.startsWith("/"))
+    .map((p) => resolve(p))
 }
 
 export const projectLockName = "skills-lock.json"

@@ -14,7 +14,7 @@ import { updateRoutes } from "./routes/updates.ts"
 import type { Services } from "./services.ts"
 
 export interface ApiOptions {
-  /** tests: where /api/open and /api/file look, instead of HOME and /mnt/data */
+  /** tests: where /api/open and /api/file look, instead of HOME and SKILLS_MANAGER_FILE_ROOTS */
   fileRoots?: FileRoots
 }
 

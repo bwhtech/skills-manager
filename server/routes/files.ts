@@ -12,7 +12,7 @@ export interface FileRoots {
 }
 
 function defaultFileRoots(): FileRoots {
-  return { home: config.home, roots: [config.home, "/mnt/data"] }
+  return { home: config.home, roots: [config.home, ...config.extraFileRoots] }
 }
 
 /** Paths written in documents: where they lead, and a view of plain files (Markdown ones editable). */
